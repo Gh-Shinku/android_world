@@ -103,6 +103,7 @@ class RandomAgent(base_agent.EnvironmentInteractingAgent):
     if self._verbose:
       print(action)
     step_data = {
+        'action': action.as_dict(),
         'raw_screenshot': state.pixels,
         'ui_elements': state.ui_elements,
     }

@@ -48,8 +48,9 @@ os.environ['GRPC_TRACE'] = 'none'  # Disable tracing
 def _find_adb_directory() -> str:
   """Returns the directory where adb is located."""
   potential_paths = [
-      os.path.expanduser('~/Library/Android/sdk/platform-tools/adb'),
-      os.path.expanduser('~/Android/Sdk/platform-tools/adb'),
+      # os.path.expanduser('~/Library/Android/sdk/platform-tools/adb'),
+      # os.path.expanduser('~/Android/Sdk/platform-tools/adb'),
+      os.path.abspath("/home/zyt/sda_ws/programs/android/platform-tools/adb")
   ]
   for path in potential_paths:
     if os.path.isfile(path):
@@ -80,6 +81,11 @@ _DEVICE_CONSOLE_PORT = flags.DEFINE_integer(
     ' retrieved by looking at the output of `adb devices`. In general, the'
     ' first connected device is port 5554, the second is 5556, and'
     ' so on.',
+)
+_GRPC_PORT = flags.DEFINE_integer(
+    'grpc_port',
+    8554,
+    'The gRPC port of the running Android emulator.',
 )
 
 _SUITE_FAMILY = flags.DEFINE_enum(
@@ -129,6 +135,21 @@ _OUTPUT_PATH = flags.DEFINE_string(
 
 # Agent specific.
 _AGENT_NAME = flags.DEFINE_string('agent_name', 'm3a_gpt4v', help='Agent name.')
+_LLM_MODEL_NAME = flags.DEFINE_string(
+    'llm_model_name',
+    'gpt-4-turbo-2024-04-09',
+    'Model name for OpenAI-compatible LLM backends.',
+)
+_LLM_API_BASE_URL = flags.DEFINE_string(
+    'llm_api_base_url',
+    'https://api.openai.com/v1',
+    'Base URL for OpenAI-compatible chat completions APIs.',
+)
+_LLM_API_KEY_ENV = flags.DEFINE_string(
+    'llm_api_key_env',
+    'OPENAI_API_KEY',
+    'Environment variable containing the API key for the LLM backend.',
+)
 
 _FIXED_TASK_SEED = flags.DEFINE_boolean(
     'fixed_task_seed',
@@ -175,6 +196,25 @@ def _get_agent(
     agent = t3a.T3A(env, infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'))
   elif _AGENT_NAME.value == 'm3a_gpt4v':
     agent = m3a.M3A(env, infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'))
+  # OpenAI-compatible APIs.
+  elif _AGENT_NAME.value == 't3a_openai_compatible':
+    agent = t3a.T3A(
+        env,
+        infer.Gpt4Wrapper(
+            _LLM_MODEL_NAME.value,
+            api_key_env=_LLM_API_KEY_ENV.value,
+            api_base_url=_LLM_API_BASE_URL.value,
+        ),
+    )
+  elif _AGENT_NAME.value == 'm3a_openai_compatible':
+    agent = m3a.M3A(
+        env,
+        infer.Gpt4Wrapper(
+            _LLM_MODEL_NAME.value,
+            api_key_env=_LLM_API_KEY_ENV.value,
+            api_base_url=_LLM_API_BASE_URL.value,
+        ),
+    )
   # SeeAct.
   elif _AGENT_NAME.value == 'seeact':
     agent = seeact.SeeAct(env)
@@ -200,6 +240,7 @@ def _main() -> None:
       console_port=_DEVICE_CONSOLE_PORT.value,
       emulator_setup=_EMULATOR_SETUP.value,
       adb_path=_ADB_PATH.value,
+      grpc_port=_GRPC_PORT.value,
   )
 
   n_task_combinations = _N_TASK_COMBINATIONS.value

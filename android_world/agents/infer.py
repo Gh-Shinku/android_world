@@ -259,16 +259,26 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
       model_name: str,
       max_retry: int = 3,
       temperature: float = 0.0,
+      api_key_env: str = 'OPENAI_API_KEY',
+      api_base_url: str = 'https://api.openai.com/v1/chat/completions',
   ):
-    if 'OPENAI_API_KEY' not in os.environ:
-      raise RuntimeError('OpenAI API key not set.')
-    self.openai_api_key = os.environ['OPENAI_API_KEY']
+    if api_key_env not in os.environ:
+      raise RuntimeError(f'{api_key_env} API key not set.')
+    self.openai_api_key = os.environ[api_key_env]
     if max_retry <= 0:
       max_retry = 3
       print('Max_retry must be positive. Reset it to 3')
     self.max_retry = min(max_retry, 5)
     self.temperature = temperature
     self.model = model_name
+    self.api_base_url = self._normalize_chat_completions_url(api_base_url)
+
+  @staticmethod
+  def _normalize_chat_completions_url(api_base_url: str) -> str:
+    api_base_url = api_base_url.rstrip('/')
+    if api_base_url.endswith('/chat/completions'):
+      return api_base_url
+    return f'{api_base_url}/chat/completions'
 
   @classmethod
   def encode_image(cls, image: np.ndarray) -> str:
@@ -315,7 +325,7 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
     while counter > 0:
       try:
         response = requests.post(
-            'https://api.openai.com/v1/chat/completions',
+            self.api_base_url,
             headers=headers,
             json=payload,
         )

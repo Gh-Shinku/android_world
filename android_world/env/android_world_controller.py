@@ -17,14 +17,17 @@
 import contextlib
 import enum
 import os
+import re
 import time
 from typing import Any
 from typing import cast
 from typing import Optional
+import urllib.request  # pylint: disable=unused-import
 from absl import logging
 from android_env import env_interface
 from android_env import loader
 from android_env.components import config_classes
+from android_env.components.simulators.emulator import emulator_simulator
 from android_env.proto.a11y import android_accessibility_forest_pb2
 from android_env.wrappers import a11y_grpc_wrapper
 from android_env.wrappers import base_wrapper
@@ -107,6 +110,143 @@ _TASK_PATH = file_utils.convert_to_posix_path(
     file_utils.get_local_tmp_directory(), 'default.textproto'
 )
 DEFAULT_ADB_PATH = '~/Android/Sdk/platform-tools/adb'
+_EMULATOR_GRPC_PATCHED = False
+_A11Y_APK_DOWNLOAD_PATCHED = False
+_A11Y_FORWARDER_APK_URL = (
+    'https://storage.googleapis.com/android_env-tasks/'
+    '2024.05.13-accessibility_forwarder.apk'
+)
+_A11Y_FORWARDER_APK_CACHE = '/tmp/android_world_accessibility_forwarder.apk'
+
+
+def _use_insecure_local_emulator_grpc() -> None:
+  """Uses an insecure local gRPC channel for newer Android emulators."""
+  global _EMULATOR_GRPC_PATCHED
+  if _EMULATOR_GRPC_PATCHED:
+    return
+
+  def _connect_to_emulator(
+      self,
+      grpc_port: int,
+      timeout_sec: int = 100,
+  ):
+    logging.info(
+        'Creating insecure gRPC channel to emulator port %r', grpc_port
+    )
+    target = f'127.0.0.1:{grpc_port}'
+    options = [
+        ('grpc.max_send_message_length', -1),
+        ('grpc.max_receive_message_length', -1),
+    ]
+
+    try:
+      self._channel = emulator_simulator.grpc.insecure_channel(
+          target, options=options
+      )
+      emulator_simulator.grpc.channel_ready_future(self._channel).result(
+          timeout=timeout_sec
+      )
+    except (
+        emulator_simulator.grpc.RpcError,
+        emulator_simulator.grpc.FutureTimeoutError,
+    ) as grpc_error:
+      logging.exception('Failed to connect to the emulator.')
+      raise emulator_simulator.EmulatorBootError(
+          'Failed to connect to the emulator.'
+      ) from grpc_error
+
+    logging.info('Added insecure gRPC channel for the Emulator on %s', target)
+    emulator_controller_stub = (
+        emulator_simulator.emulator_controller_pb2_grpc.EmulatorControllerStub(
+            self._channel
+        )
+    )
+    snapshot_stub = (
+        emulator_simulator.snapshot_service_pb2_grpc.SnapshotServiceStub(
+            self._channel
+        )
+    )
+    return emulator_controller_stub, snapshot_stub
+
+  emulator_simulator.EmulatorSimulator._connect_to_emulator = (  # pylint: disable=protected-access
+      _connect_to_emulator
+  )
+  _EMULATOR_GRPC_PATCHED = True
+
+
+def _use_cached_a11y_forwarder_apk() -> None:
+  """Caches the accessibility forwarder APK and retries partial downloads."""
+  global _A11Y_APK_DOWNLOAD_PATCHED
+  if _A11Y_APK_DOWNLOAD_PATCHED:
+    return
+
+  def _get_accessibility_forwarder_apk() -> bytes:
+    if os.path.exists(_A11Y_FORWARDER_APK_CACHE):
+      with open(_A11Y_FORWARDER_APK_CACHE, 'rb') as f:
+        return f.read()
+
+    partial_path = f'{_A11Y_FORWARDER_APK_CACHE}.part'
+    if os.path.exists(partial_path):
+      os.remove(partial_path)
+    last_error = None
+    expected_size = None
+    for attempt in range(1, 21):
+      try:
+        logging.info(
+            'Downloading accessibility forwarder APK, attempt %d.', attempt
+        )
+        offset = os.path.getsize(partial_path) if os.path.exists(
+            partial_path
+        ) else 0
+        request = urllib.request.Request(
+            _A11Y_FORWARDER_APK_URL,
+            headers={'Range': f'bytes={offset}-'},
+        )
+        with urllib.request.urlopen(request) as response:
+          content_range = response.headers.get('Content-Range')
+          if content_range:
+            match = re.search(r'/(\d+)$', content_range)
+            if match:
+              expected_size = int(match.group(1))
+          elif expected_size is None:
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+              expected_size = offset + int(content_length)
+
+          with open(partial_path, 'ab') as f:
+            while True:
+              chunk = response.read(256 * 1024)
+              if not chunk:
+                break
+              f.write(chunk)
+
+        downloaded_size = os.path.getsize(partial_path)
+        if expected_size is not None and downloaded_size >= expected_size:
+          os.replace(partial_path, _A11Y_FORWARDER_APK_CACHE)
+          with open(_A11Y_FORWARDER_APK_CACHE, 'rb') as f:
+            return f.read()
+        logging.warning(
+            'Partial accessibility forwarder APK download: %d of %s bytes.',
+            downloaded_size,
+            expected_size or 'unknown',
+        )
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        last_error = exc
+        logging.warning(
+            'Failed to download accessibility forwarder APK on attempt %d: %s',
+            attempt,
+            exc,
+        )
+      time.sleep(min(attempt, 5))
+
+    raise RuntimeError(
+        'Failed to download accessibility forwarder APK.'
+    ) from last_error
+
+  a11y_grpc_wrapper._get_accessibility_forwarder_apk = (  # pylint: disable=protected-access
+      _get_accessibility_forwarder_apk
+  )
+  _A11Y_APK_DOWNLOAD_PATCHED = True
 
 
 # UI tree-specific keys that are added to observations:
@@ -311,6 +451,8 @@ def get_controller(
 ) -> AndroidWorldController:
   """Creates a controller by connecting to an existing Android environment."""
 
+  _use_insecure_local_emulator_grpc()
+  _use_cached_a11y_forwarder_apk()
   config = config_classes.AndroidEnvConfig(
       task=config_classes.FilesystemTaskConfig(
           path=_write_default_task_proto()

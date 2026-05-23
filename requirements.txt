@@ -18,3 +18,4 @@ pytest
 requests
 tenacity
 termcolor
+setuptools<82
