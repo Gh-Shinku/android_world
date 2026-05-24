@@ -31,8 +31,8 @@ from android_world.env import representation_utils
 from IPython import display
 from matplotlib.pylab import plt
 import numpy as np
+from openai import OpenAI
 import PIL
-import requests
 
 # OpenAI model used for these experiments.
 _GPT_TURBO = "gpt-4-turbo-2024-04-09"
@@ -311,25 +311,14 @@ def execute_openai_request(
   Returns:
     The response from the OpenAI API as a dictionary.
   """
-  api_key = os.environ["OPENAI_API_KEY"]
-  headers = {
-      "Content-Type": "application/json",
-      "Authorization": f"Bearer {api_key}",
-  }
-  payload = {
-      "model": model,
-      "messages": messages_payload,
-      "temperature": temperature,
-      "max_tokens": max_tokens,
-  }
-
-  response = requests.post(
-      "https://api.openai.com/v1/chat/completions",
-      headers=headers,
-      json=payload,
+  client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+  response = client.chat.completions.create(
+      model=model,
+      messages=messages_payload,
+      temperature=temperature,
+      max_tokens=max_tokens,
   )
-
-  return response.json()
+  return response.model_dump()
 
 
 @dataclasses.dataclass(frozen=True)

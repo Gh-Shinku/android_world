@@ -14,21 +14,24 @@
 
 import os
 import time
+import types
 from unittest import mock
 from absl.testing import absltest
 from android_world.agents import infer
 import google.ai.generativelanguage as glm
 import google.generativeai as genai
+from openai.resources.chat.completions import completions
 from google.generativeai.types import answer_types
 from google.generativeai.types import generation_types
-import requests
 
 
 class InferTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.mock_post = mock.patch.object(requests, "post").start()
+    self.mock_create = mock.patch.object(
+        completions.Completions, "create"
+    ).start()
     self.mock_sleep = mock.patch.object(time, "sleep").start()
     os.environ["OPENAI_API_KEY"] = "fake_api_key"
     os.environ["GCP_API_KEY"] = "fake_api_key"
@@ -102,12 +105,14 @@ class InferTest(absltest.TestCase):
 
   def test_gpt4v(self):
     llm = infer.Gpt4Wrapper(model_name="gpt-4-turbo-2024-04-09")
-    mock_200_response = requests.Response()
-    mock_200_response.status_code = 200
-    mock_200_response._content = (
-        b'{"choices": [{"message": {"content": "fake response"}}]}'
+    mock_response = types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(
+                message=types.SimpleNamespace(content="fake response")
+            )
+        ]
     )
-    self.mock_post.return_value = mock_200_response
+    self.mock_create.return_value = mock_response
 
     text_output, _, _ = llm.predict_mm("fake prompt", [])
     self.assertEqual(text_output, "fake response")
@@ -115,21 +120,37 @@ class InferTest(absltest.TestCase):
   def test_gpt4v_retry(self):
     gpt4v = infer.Gpt4Wrapper(model_name="gpt-4-turbo-2024-04-09")
 
-    mock_429_response = requests.Response()
-    mock_429_response.status_code = 429
-    mock_429_response._content = (
-        b'{"error": {"message": "Error 429: rate limit reached."}}'
+    mock_response = types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(message=types.SimpleNamespace(content="ok."))
+        ]
     )
-
-    mock_200_response = requests.Response()
-    mock_200_response.status_code = 200
-    mock_200_response._content = (
-        b'{"choices": [{"message": {"content": "ok."}}]}'
-    )
-    self.mock_post.side_effect = [mock_429_response, mock_200_response]
+    self.mock_create.side_effect = [
+        RuntimeError("Error 429: rate limit reached."),
+        mock_response,
+    ]
 
     gpt4v.predict_mm("fake prompt", [])
     self.mock_sleep.assert_called_once()
+
+  def test_openai_compatible_extra_body_and_request_kwargs(self):
+    llm = infer.Gpt4Wrapper(
+        model_name="deepseek-v4-pro",
+        extra_body={"thinking": {"type": "enabled"}},
+        extra_request_kwargs={"reasoning_effort": "high"},
+    )
+    mock_response = types.SimpleNamespace(
+        choices=[
+            types.SimpleNamespace(message=types.SimpleNamespace(content="ok."))
+        ]
+    )
+    self.mock_create.return_value = mock_response
+
+    llm.predict("fake prompt")
+
+    create_kwargs = self.mock_create.call_args.kwargs
+    self.assertEqual(create_kwargs["extra_body"]["thinking"]["type"], "enabled")
+    self.assertEqual(create_kwargs["reasoning_effort"], "high")
 
 
 if __name__ == "__main__":

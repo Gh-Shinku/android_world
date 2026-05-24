@@ -189,37 +189,58 @@ def _load_llm_config() -> dict[str, object]:
     return json.load(f)
 
 
-def _get_deepseek_wrapper(config: dict[str, object]) -> infer.DeepSeekWrapper:
-  provider = config.get('provider', 'deepseek')
-  if provider != 'deepseek':
-    raise ValueError('Config provider must be "deepseek" for t3a_deepseek.')
-
-  thinking_config = config.get('thinking', {})
-  if not isinstance(thinking_config, dict):
-    raise ValueError('DeepSeek config field "thinking" must be an object.')
+def _get_openai_compatible_wrapper(
+    config: dict[str, object],
+) -> infer.Gpt4Wrapper:
+  if not config:
+    return infer.Gpt4Wrapper(
+        _LLM_MODEL_NAME.value,
+        api_key_env=_LLM_API_KEY_ENV.value,
+        api_base_url=_LLM_API_BASE_URL.value,
+    )
 
   api_key = config.get('api_key')
   if api_key == '':
     api_key = None
   if api_key is not None and not isinstance(api_key, str):
-    raise ValueError('DeepSeek config field "api_key" must be a string.')
+    raise ValueError('LLM config field "api_key" must be a string.')
   temperature = config.get('temperature', 0.0)
   if temperature is not None:
     temperature = float(temperature)
-  max_tokens = config.get('max_tokens')
+  max_tokens = config.get('max_tokens', 1000)
   if max_tokens is not None:
     max_tokens = int(max_tokens)
+  extra_body = config.get('extra_body', {})
+  if not isinstance(extra_body, dict):
+    raise ValueError('LLM config field "extra_body" must be an object.')
+  extra_request_kwargs = config.get('extra_request_kwargs', {})
+  if not isinstance(extra_request_kwargs, dict):
+    raise ValueError(
+        'LLM config field "extra_request_kwargs" must be an object.'
+    )
+  if extra_request_kwargs.get('stream'):
+    raise ValueError('Streaming responses are not supported by Android World.')
 
-  return infer.DeepSeekWrapper(
-      model_name=str(config.get('model', 'deepseek-v4-pro')),
+  model_name = config.get('model')
+  if model_name is None:
+    model_name = 'gpt-4-turbo-2024-04-09'
+  api_key_env = config.get('api_key_env')
+  if api_key_env is None:
+    api_key_env = 'OPENAI_API_KEY'
+  api_base_url = config.get('base_url')
+  if api_base_url is None:
+    api_base_url = 'https://api.openai.com/v1'
+
+  return infer.Gpt4Wrapper(
+      model_name=str(model_name),
       api_key=api_key,
-      api_key_env=str(config.get('api_key_env', 'DEEPSEEK_API_KEY')),
-      api_base_url=str(config.get('base_url', 'https://api.deepseek.com')),
-      thinking_enabled=bool(thinking_config.get('enabled', True)),
-      reasoning_effort=str(thinking_config.get('effort', 'high')),
+      api_key_env=str(api_key_env),
+      api_base_url=str(api_base_url),
       max_retry=int(config.get('max_retry', 3)),
       max_tokens=max_tokens,
       temperature=temperature,
+      extra_body=extra_body,
+      extra_request_kwargs=extra_request_kwargs,
   )
 
 
@@ -251,26 +272,9 @@ def _get_agent(
     agent = m3a.M3A(env, infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'))
   # OpenAI-compatible APIs.
   elif _AGENT_NAME.value == 't3a_openai_compatible':
-    agent = t3a.T3A(
-        env,
-        infer.Gpt4Wrapper(
-            _LLM_MODEL_NAME.value,
-            api_key_env=_LLM_API_KEY_ENV.value,
-            api_base_url=_LLM_API_BASE_URL.value,
-        ),
-    )
+    agent = t3a.T3A(env, _get_openai_compatible_wrapper(llm_config))
   elif _AGENT_NAME.value == 'm3a_openai_compatible':
-    agent = m3a.M3A(
-        env,
-        infer.Gpt4Wrapper(
-            _LLM_MODEL_NAME.value,
-            api_key_env=_LLM_API_KEY_ENV.value,
-            api_base_url=_LLM_API_BASE_URL.value,
-        ),
-    )
-  # DeepSeek.
-  elif _AGENT_NAME.value == 't3a_deepseek':
-    agent = t3a.T3A(env, _get_deepseek_wrapper(llm_config))
+    agent = m3a.M3A(env, _get_openai_compatible_wrapper(llm_config))
   # SeeAct.
   elif _AGENT_NAME.value == 'seeact':
     agent = seeact.SeeAct(env)

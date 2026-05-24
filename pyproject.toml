@@ -24,6 +24,7 @@ dependencies = [
     "jsonschema==4.17.3",
     "numpy==1.26.3",
     "opencv-python",
+    "openai",
     "pandas==2.1.4",
     "pydub",
     "python-Levenshtein",
