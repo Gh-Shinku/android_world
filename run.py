@@ -21,6 +21,7 @@ command-line flags.
 """
 
 from collections.abc import Sequence
+import json
 import os
 
 from absl import app
@@ -117,6 +118,11 @@ _N_TASK_COMBINATIONS = flags.DEFINE_integer(
     1,
     'Number of task instances to run for each task template.',
 )
+_MAX_STEPS = flags.DEFINE_integer(
+    'max_steps',
+    0,
+    'Maximum number of agent steps per episode. If 0, use task complexity.',
+)
 
 _CHECKPOINT_DIR = flags.DEFINE_string(
     'checkpoint_dir',
@@ -150,6 +156,11 @@ _LLM_API_KEY_ENV = flags.DEFINE_string(
     'OPENAI_API_KEY',
     'Environment variable containing the API key for the LLM backend.',
 )
+_LLM_CONFIG_PATH = flags.DEFINE_string(
+    'llm_config_path',
+    '',
+    'Path to a JSON config file for provider-specific LLM settings.',
+)
 
 _FIXED_TASK_SEED = flags.DEFINE_boolean(
     'fixed_task_seed',
@@ -171,6 +182,47 @@ _MINIWOB_ADDITIONAL_GUIDELINES = [
 ]
 
 
+def _load_llm_config() -> dict[str, object]:
+  if not _LLM_CONFIG_PATH.value:
+    return {}
+  with open(_LLM_CONFIG_PATH.value, 'r', encoding='utf-8') as f:
+    return json.load(f)
+
+
+def _get_deepseek_wrapper(config: dict[str, object]) -> infer.DeepSeekWrapper:
+  provider = config.get('provider', 'deepseek')
+  if provider != 'deepseek':
+    raise ValueError('Config provider must be "deepseek" for t3a_deepseek.')
+
+  thinking_config = config.get('thinking', {})
+  if not isinstance(thinking_config, dict):
+    raise ValueError('DeepSeek config field "thinking" must be an object.')
+
+  api_key = config.get('api_key')
+  if api_key == '':
+    api_key = None
+  if api_key is not None and not isinstance(api_key, str):
+    raise ValueError('DeepSeek config field "api_key" must be a string.')
+  temperature = config.get('temperature', 0.0)
+  if temperature is not None:
+    temperature = float(temperature)
+  max_tokens = config.get('max_tokens')
+  if max_tokens is not None:
+    max_tokens = int(max_tokens)
+
+  return infer.DeepSeekWrapper(
+      model_name=str(config.get('model', 'deepseek-v4-pro')),
+      api_key=api_key,
+      api_key_env=str(config.get('api_key_env', 'DEEPSEEK_API_KEY')),
+      api_base_url=str(config.get('base_url', 'https://api.deepseek.com')),
+      thinking_enabled=bool(thinking_config.get('enabled', True)),
+      reasoning_effort=str(thinking_config.get('effort', 'high')),
+      max_retry=int(config.get('max_retry', 3)),
+      max_tokens=max_tokens,
+      temperature=temperature,
+  )
+
+
 def _get_agent(
     env: interface.AsyncEnv,
     family: str | None = None,
@@ -178,6 +230,7 @@ def _get_agent(
   """Gets agent."""
   print('Initializing agent...')
   agent = None
+  llm_config = _load_llm_config()
   if _AGENT_NAME.value == 'human_agent':
     agent = human_agent.HumanAgent(env)
   elif _AGENT_NAME.value == 'random_agent':
@@ -215,6 +268,9 @@ def _get_agent(
             api_base_url=_LLM_API_BASE_URL.value,
         ),
     )
+  # DeepSeek.
+  elif _AGENT_NAME.value == 't3a_deepseek':
+    agent = t3a.T3A(env, _get_deepseek_wrapper(llm_config))
   # SeeAct.
   elif _AGENT_NAME.value == 'seeact':
     agent = seeact.SeeAct(env)
@@ -276,6 +332,7 @@ def _main() -> None:
       agent,
       checkpointer=checkpointer_lib.IncrementalCheckpointer(checkpoint_dir),
       demo_mode=False,
+      max_n_steps=_MAX_STEPS.value or None,
   )
   print(
       f'Finished running agent {_AGENT_NAME.value} on {_SUITE_FAMILY.value}'

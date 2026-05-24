@@ -425,6 +425,7 @@ def run(
     agent: base_agent.EnvironmentInteractingAgent,
     checkpointer: checkpointer_lib.Checkpointer = checkpointer_lib.NullCheckpointer(),
     demo_mode: bool = False,
+    max_n_steps: int | None = None,
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
@@ -440,6 +441,7 @@ def run(
       are executed.
     demo_mode: Whether to run in demo mode, which displays a scoreboard and the
       task instruction as a notification.
+    max_n_steps: If set, overrides the per-task step budget.
     return_full_episode_data: Whether to return full episode data instead of
       just metadata.
     process_episodes_fn: The function to process episode data. Usually to
@@ -456,7 +458,9 @@ def run(
     return episode_runner.run_episode(
         goal=task.goal,
         agent=agent,
-        max_n_steps=_allocate_step_budget(task.complexity),
+        max_n_steps=max_n_steps
+        if max_n_steps is not None
+        else _allocate_step_budget(task.complexity),
         start_on_home_screen=task.start_on_home_screen,
         termination_fn=(
             miniwob_base.is_episode_terminated

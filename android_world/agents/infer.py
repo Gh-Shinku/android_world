@@ -258,13 +258,16 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
       self,
       model_name: str,
       max_retry: int = 3,
-      temperature: float = 0.0,
+      temperature: float | None = 0.0,
       api_key_env: str = 'OPENAI_API_KEY',
       api_base_url: str = 'https://api.openai.com/v1/chat/completions',
+      api_key: str | None = None,
+      max_tokens: int | None = 1000,
+      extra_payload: dict[str, Any] | None = None,
   ):
-    if api_key_env not in os.environ:
+    if api_key is None and api_key_env not in os.environ:
       raise RuntimeError(f'{api_key_env} API key not set.')
-    self.openai_api_key = os.environ[api_key_env]
+    self.openai_api_key = api_key or os.environ[api_key_env]
     if max_retry <= 0:
       max_retry = 3
       print('Max_retry must be positive. Reset it to 3')
@@ -272,6 +275,8 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
     self.temperature = temperature
     self.model = model_name
     self.api_base_url = self._normalize_chat_completions_url(api_base_url)
+    self.max_tokens = max_tokens
+    self.extra_payload = extra_payload or {}
 
   @staticmethod
   def _normalize_chat_completions_url(api_base_url: str) -> str:
@@ -298,21 +303,30 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
         'Authorization': f'Bearer {self.openai_api_key}',
     }
 
+    content: str | list[dict[str, Any]]
+    content = text_prompt
+    if images:
+      content = [
+          {'type': 'text', 'text': text_prompt},
+      ]
+
     payload = {
         'model': self.model,
-        'temperature': self.temperature,
         'messages': [{
             'role': 'user',
-            'content': [
-                {'type': 'text', 'text': text_prompt},
-            ],
+            'content': content,
         }],
-        'max_tokens': 1000,
     }
+    if self.max_tokens is not None:
+      payload['max_tokens'] = self.max_tokens
+    if self.temperature is not None:
+      payload['temperature'] = self.temperature
+    payload.update(self.extra_payload)
 
     # Gpt-4v supports multiple images, just need to insert them in the content
     # list.
     for image in images:
+      assert isinstance(payload['messages'][0]['content'], list)
       payload['messages'][0]['content'].append({
           'type': 'image_url',
           'image_url': {
@@ -349,3 +363,45 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
         print('Error calling LLM, will retry soon...')
         print(e)
     return ERROR_CALLING_LLM, None, None
+
+
+class DeepSeekWrapper(Gpt4Wrapper):
+  """DeepSeek chat completions wrapper."""
+
+  def __init__(
+      self,
+      model_name: str,
+      api_key: str | None = None,
+      api_key_env: str = 'DEEPSEEK_API_KEY',
+      api_base_url: str = 'https://api.deepseek.com',
+      thinking_enabled: bool = True,
+      reasoning_effort: str = 'high',
+      max_retry: int = 3,
+      max_tokens: int | None = None,
+      temperature: float | None = 0.0,
+  ):
+    if reasoning_effort not in ('high', 'max'):
+      raise ValueError(
+          "DeepSeek reasoning_effort must be either 'high' or 'max'."
+      )
+
+    extra_payload = {
+        'thinking': {
+            'type': 'enabled' if thinking_enabled else 'disabled',
+        },
+    }
+    if thinking_enabled:
+      extra_payload['reasoning_effort'] = reasoning_effort
+      # DeepSeek thinking mode ignores temperature-like sampling parameters.
+      temperature = None
+
+    super().__init__(
+        model_name=model_name,
+        max_retry=max_retry,
+        temperature=temperature,
+        api_key_env=api_key_env,
+        api_base_url=api_base_url,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        extra_payload=extra_payload,
+    )
