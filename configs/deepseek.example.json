@@ -4,8 +4,15 @@
   "model": "deepseek-v4-flash",
   "api_key_env": "DEEPSEEK_API_KEY",
   "api_key": "",
-  "thinking": {
-    "enabled": true,
-    "effort": "high"
+  "temperature": null,
+  "max_tokens": null,
+  "max_retry": 3,
+  "extra_request_kwargs": {
+    "reasoning_effort": "high"
+  },
+  "extra_body": {
+    "thinking": {
+      "type": "enabled"
+    }
   }
 }

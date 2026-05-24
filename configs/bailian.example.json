@@ -1,0 +1,13 @@
+{
+  "provider": "bailian",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "model": "qwen3.6-flash",
+  "api_key_env": "DASHSCOPE_API_KEY",
+  "api_key": "",
+  "temperature": null,
+  "max_tokens": null,
+  "max_retry": 3,
+  "extra_body": {
+    "enable_thinking": true
+  }
+}
