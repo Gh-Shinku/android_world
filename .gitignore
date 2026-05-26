@@ -25,3 +25,4 @@ poetry.lock
 .idea
 
 runs/
+logs/

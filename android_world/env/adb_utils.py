@@ -60,7 +60,7 @@ _PATTERN_TO_ACTIVITY = immutabledict.immutabledict({
     ),
     'camera': 'com.android.camera2/com.android.camera.CameraLauncher',
     'audio recorder': (
-        'com.dimowner.audiorecorder/com.dimowner.audiorecorder.app.welcome.WelcomeActivity'
+        'com.dimowner.audiorecorder/com.dimowner.audiorecorder.app.main.MainActivity'
     ),
     'google drive|gdrive|drive': (
         'com.google.android.apps.docs/.drive.startup.StartupActivity'
