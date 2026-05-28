@@ -15,8 +15,10 @@
 """Utilities for evaluating automation agents."""
 
 import collections
+import dataclasses
 import datetime
 import hashlib
+import json
 import logging
 import os
 import random
@@ -316,6 +318,194 @@ def _get_task_info(
   return completed, failed
 
 
+def _jsonable(value: Any) -> Any:
+  """Converts Android World objects to JSON-safe values."""
+  if value is None or isinstance(value, (str, int, float, bool)):
+    return value
+  if isinstance(value, np.generic):
+    return value.item()
+  if dataclasses.is_dataclass(value):
+    return _jsonable(dataclasses.asdict(value))
+  if hasattr(value, 'as_dict') and callable(value.as_dict):
+    try:
+      return _jsonable(value.as_dict())
+    except TypeError:
+      pass
+  if isinstance(value, dict):
+    return {str(k): _jsonable(v) for k, v in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_jsonable(item) for item in value]
+  return repr(value)
+
+
+def _get_step_value(values: Any, step_index: int) -> Any:
+  if isinstance(values, list) and step_index < len(values):
+    return values[step_index]
+  return None
+
+
+def _episode_step_count(episode_data: dict[str, Any]) -> int:
+  for values in episode_data.values():
+    if isinstance(values, list):
+      return len(values)
+  return 0
+
+
+def _action_prompt_hash(prompt: Any) -> str | None:
+  if not isinstance(prompt, str):
+    return None
+  return hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+
+
+def _append_jsonl(output_path: str, record: dict[str, Any]) -> None:
+  os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+  with open(output_path, 'a', encoding='utf-8') as f:
+    f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
+def _append_runtime_prompt_jsonl(
+    output_path: str,
+    *,
+    task_template: str,
+    instance_id: int,
+    agent_name: str,
+    goal: str,
+    prompt: str,
+    prompt_kind: str,
+    step_number: int,
+) -> None:
+  """Appends one exact runtime LLM prompt record."""
+  _append_jsonl(
+      output_path,
+      {
+          constants.EpisodeConstants.TASK_TEMPLATE: task_template,
+          constants.EpisodeConstants.INSTANCE_ID: instance_id,
+          constants.EpisodeConstants.AGENT_NAME: agent_name,
+          constants.EpisodeConstants.GOAL: goal,
+          constants.STEP_NUMBER: step_number,
+          'prompt_kind': prompt_kind,
+          'prompt_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+          'prompt': prompt,
+      },
+  )
+
+
+def _create_prompt_data_item(
+    episode: dict[str, Any],
+    additional_guidelines: list[str] | None,
+) -> dict[str, Any] | None:
+  """Creates a prompt component record for a T3A episode."""
+  episode_data = episode.get(constants.EpisodeConstants.EPISODE_DATA)
+  if not isinstance(episode_data, dict):
+    return None
+
+  screen_config = episode.get(constants.EpisodeConstants.SCREEN_CONFIG) or {}
+  screen_size = (
+      int(screen_config.get('width', 1080)),
+      int(screen_config.get('height', 2400)),
+  )
+
+  # Imported lazily to avoid making suite utilities depend on T3A at import time.
+  from android_world.agents import t3a as t3a_agent  # pylint: disable=g-import-not-at-top
+
+  steps = []
+  summaries: list[str] = []
+  step_count = _episode_step_count(episode_data)
+  for step_index in range(step_count):
+    before_elements = _get_step_value(
+        episode_data.get('before_element_list'), step_index
+    )
+    if not isinstance(before_elements, list):
+      continue
+
+    before_elements_description = (
+        t3a_agent._generate_ui_elements_description_list_full(  # pylint: disable=protected-access
+            before_elements, screen_size
+        )
+    )
+    summary = _get_step_value(episode_data.get('summary'), step_index)
+    action_prompt = _get_step_value(episode_data.get('action_prompt'), step_index)
+
+    steps.append({
+        constants.STEP_NUMBER: _get_step_value(
+            episode_data.get(constants.STEP_NUMBER), step_index
+        ),
+        'before_elements': _jsonable(before_elements),
+        'before_elements_description': before_elements_description,
+        'history_summaries': summaries.copy(),
+        'summary': summary,
+        'action_prompt_sha256': _action_prompt_hash(action_prompt),
+    })
+    if isinstance(summary, str):
+      summaries.append(summary)
+
+  if not steps:
+    return None
+
+  return {
+      constants.EpisodeConstants.TASK_TEMPLATE: episode.get(
+          constants.EpisodeConstants.TASK_TEMPLATE
+      ),
+      constants.EpisodeConstants.GOAL: episode.get(
+          constants.EpisodeConstants.GOAL
+      ),
+      constants.EpisodeConstants.AGENT_NAME: episode.get(
+          constants.EpisodeConstants.AGENT_NAME
+      ),
+      constants.EpisodeConstants.INSTANCE_ID: episode.get(
+          constants.EpisodeConstants.INSTANCE_ID
+      ),
+      constants.EpisodeConstants.IS_SUCCESSFUL: episode.get(
+          constants.EpisodeConstants.IS_SUCCESSFUL
+      ),
+      constants.EpisodeConstants.RUN_TIME: episode.get(
+          constants.EpisodeConstants.RUN_TIME
+      ),
+      constants.EpisodeConstants.SEED: episode.get(
+          constants.EpisodeConstants.SEED
+      ),
+      'additional_guidelines': _jsonable(additional_guidelines),
+      constants.EpisodeConstants.SCREEN_CONFIG: _jsonable(screen_config),
+      'prompt_builder': 'android_world.agents.t3a._action_selection_prompt',
+      'ui_formatter': (
+          'android_world.agents.t3a.'
+          '_generate_ui_elements_description_list_full'
+      ),
+      'steps': steps,
+  }
+
+
+def _append_prompt_data_jsonl(
+    episode: dict[str, Any],
+    output_path: str,
+    additional_guidelines: list[str] | None,
+) -> None:
+  item = _create_prompt_data_item(episode, additional_guidelines)
+  if item is None:
+    return
+  os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+  records = []
+  if os.path.exists(output_path):
+    with open(output_path, 'r', encoding='utf-8') as f:
+      for index, line in enumerate(f):
+        line = line.strip()
+        if line:
+          records.append((index, json.loads(line)))
+
+  records.append((len(records), item))
+  records.sort(
+      key=lambda record: (
+          str(record[1].get(constants.EpisodeConstants.TASK_TEMPLATE) or ''),
+          record[0],
+      )
+  )
+
+  with open(output_path, 'w', encoding='utf-8') as f:
+    for _, record in records:
+      f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
 def _run_task_suite(
     suite: Suite,
     run_episode: Callable[[task_eval.TaskEval], episode_runner.EpisodeResult],
@@ -323,9 +513,13 @@ def _run_task_suite(
     checkpointer: checkpointer_lib.Checkpointer = checkpointer_lib.NullCheckpointer(),
     demo_mode: bool = False,
     agent_name: str = '',
+    prompt_data_out: str = '',
+    runtime_prompt_out: str = '',
+    additional_guidelines: list[str] | None = None,
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
+    configure_runtime_prompt_logger: Callable[[str, int], None] | None = None,
 ) -> list[dict[str, Any]]:
   """Runs e2e system on suite.
 
@@ -336,11 +530,16 @@ def _run_task_suite(
     checkpointer: See docstring from `run`.
     demo_mode: Whether to display the scoreboard.
     agent_name: The name of the agent.
+    prompt_data_out: JSONL path for T3A prompt component records.
+    runtime_prompt_out: JSONL path for exact runtime LLM prompt records.
+    additional_guidelines: Agent task guidelines included in prompt records.
     return_full_episode_data: Whether to return full episode data instead of
       just metadata.
     process_episodes_fn: The function to process episode data. Usually to
       compute metrics. Deafaults to process_episodes from this file.
     check_episode_fn: The function to check episode data.
+    configure_runtime_prompt_logger: Optional hook to install a per-episode
+      runtime prompt logger on the agent.
 
   Returns:
     Metadata for each episode, including the scripted reward.
@@ -391,6 +590,8 @@ def _run_task_suite(
         _log_and_print('Skipping already processed task %s', instance_name)
         continue
 
+      if configure_runtime_prompt_logger is not None:
+        configure_runtime_prompt_logger(instance.name, i)
       episode = _run_task(instance, run_episode, env, demo_mode=demo_mode)
       if (
           episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None
@@ -401,6 +602,15 @@ def _run_task_suite(
       episode[constants.EpisodeConstants.AGENT_NAME] = agent_name
       episode[constants.EpisodeConstants.INSTANCE_ID] = i
       checkpointer.save_episodes([episode], instance_name)
+      if (
+          prompt_data_out
+          and episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None
+      ):
+        _append_prompt_data_jsonl(
+            episode,
+            prompt_data_out,
+            additional_guidelines=additional_guidelines,
+        )
 
       if return_full_episode_data:
         full_episode_data.append(episode)
@@ -426,6 +636,8 @@ def run(
     checkpointer: checkpointer_lib.Checkpointer = checkpointer_lib.NullCheckpointer(),
     demo_mode: bool = False,
     max_n_steps: int | None = None,
+    prompt_data_out: str = '',
+    runtime_prompt_out: str = '',
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
@@ -442,6 +654,8 @@ def run(
     demo_mode: Whether to run in demo mode, which displays a scoreboard and the
       task instruction as a notification.
     max_n_steps: If set, overrides the per-task step budget.
+    prompt_data_out: JSONL path for T3A prompt component records.
+    runtime_prompt_out: JSONL path for exact runtime LLM prompt records.
     return_full_episode_data: Whether to return full episode data instead of
       just metadata.
     process_episodes_fn: The function to process episode data. Usually to
@@ -477,6 +691,26 @@ def run(
         extras={'player_name': agent.name, 'scoreboard_value': '00/00'},
     )
 
+  def configure_runtime_prompt_logger(
+      task_template: str, instance_id: int
+  ) -> None:
+    if not hasattr(agent, 'set_runtime_prompt_logger'):
+      return
+    if not runtime_prompt_out:
+      agent.set_runtime_prompt_logger(None)
+      return
+
+    def runtime_prompt_logger(**kwargs: Any) -> None:
+      _append_runtime_prompt_jsonl(
+          runtime_prompt_out,
+          task_template=task_template,
+          instance_id=instance_id,
+          agent_name=agent.name,
+          **kwargs,
+      )
+
+    agent.set_runtime_prompt_logger(runtime_prompt_logger)
+
   results = _run_task_suite(
       suite,
       run_episode,
@@ -484,9 +718,13 @@ def run(
       checkpointer=checkpointer,
       demo_mode=demo_mode,
       agent_name=agent.name,
+      prompt_data_out=prompt_data_out,
+      runtime_prompt_out=runtime_prompt_out,
+      additional_guidelines=getattr(agent, 'additional_guidelines', None),
       return_full_episode_data=return_full_episode_data,
       process_episodes_fn=process_episodes_fn,
       check_episode_fn=check_episode_fn,
+      configure_runtime_prompt_logger=configure_runtime_prompt_logger,
   )
 
   return results

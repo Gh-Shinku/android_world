@@ -113,6 +113,11 @@ _TASKS = flags.DEFINE_list(
     'List of specific tasks to run in the given suite family. If None, run all'
     ' tasks in the suite family.',
 )
+_FIRST_K_TASKS = flags.DEFINE_integer(
+    'first_k_tasks',
+    0,
+    'Run only the first K task templates after suite filtering. If 0, run all.',
+)
 _N_TASK_COMBINATIONS = flags.DEFINE_integer(
     'n_task_combinations',
     1,
@@ -134,9 +139,19 @@ _CHECKPOINT_DIR = flags.DEFINE_string(
 )
 _OUTPUT_PATH = flags.DEFINE_string(
     'output_path',
-    os.path.expanduser('~/android_world/runs'),
+    os.path.expanduser('./runs'),
     'The path to save results to if not resuming from a checkpoint is not'
     ' provided.',
+)
+_PROMPT_DATA_OUT = flags.DEFINE_string(
+    'prompt_data_out',
+    '',
+    'JSONL path to write T3A action-selection prompt component data.',
+)
+_RUNTIME_PROMPT_OUT = flags.DEFINE_string(
+    'runtime_prompt_out',
+    '',
+    'JSONL path to write exact runtime T3A action-selection prompts.',
 )
 
 # Agent specific.
@@ -312,6 +327,8 @@ def _main() -> None:
       tasks=_TASKS.value,
       use_identical_params=_FIXED_TASK_SEED.value,
   )
+  if _FIRST_K_TASKS.value:
+    suite = suite_utils.Suite(list(suite.items())[: _FIRST_K_TASKS.value])
   suite.suite_family = _SUITE_FAMILY.value
 
   agent = _get_agent(env, _SUITE_FAMILY.value)
@@ -337,6 +354,8 @@ def _main() -> None:
       checkpointer=checkpointer_lib.IncrementalCheckpointer(checkpoint_dir),
       demo_mode=False,
       max_n_steps=_MAX_STEPS.value or None,
+      prompt_data_out=_PROMPT_DATA_OUT.value,
+      runtime_prompt_out=_RUNTIME_PROMPT_OUT.value,
   )
   print(
       f'Finished running agent {_AGENT_NAME.value} on {_SUITE_FAMILY.value}'

@@ -137,6 +137,7 @@ def _use_insecure_local_emulator_grpc() -> None:
     options = [
         ('grpc.max_send_message_length', -1),
         ('grpc.max_receive_message_length', -1),
+        ('grpc.enable_http_proxy', 0),
     ]
 
     try:

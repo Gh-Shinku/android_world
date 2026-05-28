@@ -14,6 +14,8 @@
 
 """T3A: Text-only Autonomous Agent for Android."""
 
+from typing import Callable
+
 from android_world.agents import agent_utils
 from android_world.agents import base_agent
 from android_world.agents import infer
@@ -289,6 +291,7 @@ class T3A(base_agent.EnvironmentInteractingAgent):
     self.llm = llm
     self.history = []
     self.additional_guidelines = None
+    self.runtime_prompt_logger: Callable[..., None] | None = None
 
   def reset(self, go_home_on_reset: bool = False):
     super().reset(go_home_on_reset)
@@ -297,6 +300,11 @@ class T3A(base_agent.EnvironmentInteractingAgent):
 
   def set_task_guidelines(self, task_guidelines: list[str]) -> None:
     self.additional_guidelines = task_guidelines
+
+  def set_runtime_prompt_logger(
+      self, runtime_prompt_logger: Callable[..., None] | None
+  ) -> None:
+    self.runtime_prompt_logger = runtime_prompt_logger
 
   def step(self, goal: str) -> base_agent.AgentInteractionResult:
     step_data = {
@@ -335,6 +343,13 @@ class T3A(base_agent.EnvironmentInteractingAgent):
         self.additional_guidelines,
     )
     step_data['action_prompt'] = action_prompt
+    if self.runtime_prompt_logger is not None:
+      self.runtime_prompt_logger(
+          goal=goal,
+          prompt=action_prompt,
+          prompt_kind='t3a_action_selection',
+          step_number=len(self.history),
+      )
     action_output, is_safe, raw_response = self.llm.predict(
         action_prompt,
     )

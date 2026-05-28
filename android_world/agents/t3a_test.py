@@ -56,6 +56,28 @@ class T3AInteractionTest(absltest.TestCase):
 
     self.assertTrue(step_data.done)
 
+  def test_runtime_prompt_logger_records_action_prompt_before_llm_call(self):
+    env = test_utils.FakeAsyncEnv()
+    mock_llm = MockLlmWrapper([(
+        (
+            "Reason: completed.\nAction: {'action_type': 'status',"
+            " 'goal_status': 'complete'}"
+        ),
+        "fake_response",
+    )])
+    agent = t3a.T3A(env, mock_llm)
+    records = []
+    agent.set_runtime_prompt_logger(lambda **kwargs: records.append(kwargs))
+
+    step_data = agent.step("do something")
+
+    self.assertTrue(step_data.done)
+    self.assertLen(records, 1)
+    self.assertEqual(records[0]['prompt_kind'], 't3a_action_selection')
+    self.assertEqual(records[0]['step_number'], 0)
+    self.assertEqual(records[0]['goal'], 'do something')
+    self.assertEqual(records[0]['prompt'], step_data.data['action_prompt'])
+
   def test_history_recording(self):
     env = test_utils.FakeAsyncEnv()
     mock_llm = MockLlmWrapper([
