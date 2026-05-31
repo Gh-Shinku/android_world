@@ -6,6 +6,11 @@ PROMPT_JSONL ?= ./runs/android_world_data.jsonl
 UI_STATE_DATASET ?= ui-state/data/processed/prompt_dataset.jsonl
 UI_STATE_MODEL ?= /mnt/sda/zyt/models/Llama-3.2-3B-Instruct
 UI_STATE_RUN ?= ui-state/runs/20260528_225849
+UI_STATE_A11Y_INPUT ?= data/A11y
+UI_STATE_IR_OUTPUT ?= data/ui_state_prompt_ir
+UI_STATE_IR_APPS ?=
+UI_STATE_IR_ARGS ?=
+UI_STATE_IR_APP_ARGS = $(if $(strip $(UI_STATE_IR_APPS)),--apps $(UI_STATE_IR_APPS),)
 
 # TASK ?= ContactsAddContact
 FIRST_K_TASKS ?= 0
@@ -22,7 +27,8 @@ MAX_STEPS ?= 20
 	reconstruct-prompts export-pkl install-package collect \
 	ui-state-dataset ui-state-kv ui-state-kv-resume ui-state-kv-test \
 	ui-state-analyze ui-state-analyze-test \
-	install-apps emulator check-emulator estimate-kv collect-a11y
+	install-apps emulator check-emulator estimate-kv collect-a11y \
+	ir ir-clean compile-ui-state-ir compile-ui-state-ir-clean compile
 
 help:
 	@echo "Targets:"
@@ -39,6 +45,9 @@ help:
 	@echo "  make install-package     Reinstall this project into site-packages"
 	@echo "  make collect    Run a short live Android World DeepSeek task"
 	@echo "  make install-apps          Install and initialize all Android World apps"
+	@echo "  make collect-a11y          Collect raw A11y trees and screenshots"
+	@echo "  make ir                    Build exploratory UI-state IR candidates"
+	@echo "  make compile-ui-state-ir   Compile raw A11y trees into prompt-oriented UI IR"
 
 estimate-kv:
 	$(NLP_PYTHON) scripts/estimate_kv_cache_size.py \
@@ -135,5 +144,20 @@ check-emulator:
 
 collect-a11y:
 	@$(ANDROID-WORLD_PYTHON) scripts/collect_raw_a11y_trees.py \
-    --console_port 5554 \
-    --grpc_port 8554
+		--console_port $(CONSOLE_PORT) \
+		--grpc_port $(GRPC_PORT)
+
+ir:
+	@$(ANDROID-WORLD_PYTHON) scripts/build_ui_state_ir_candidates.py \
+		--model $(UI_STATE_MODEL)
+
+ir-clean:
+	@rm -rf data/ui_state_ir_candidates
+
+compile-ui-state-ir:
+	@$(ANDROID-WORLD_PYTHON) scripts/compile_ui_state_ir.py --input-dir $(UI_STATE_A11Y_INPUT) --output-dir $(UI_STATE_IR_OUTPUT) $(UI_STATE_IR_APP_ARGS) $(UI_STATE_IR_ARGS)
+
+compile-ui-state-ir-clean:
+	@rm -rf $(UI_STATE_IR_OUTPUT)
+
+compile: compile-ui-state-ir
