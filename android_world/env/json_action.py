@@ -64,6 +64,7 @@ TEXT = 'text'
 DIRECTION = 'direction'
 APP_NAME = 'app_name'
 GOAL_STATUS = 'goal_status'
+TARGET = 'target'
 
 ACTION_KEYS = [
     ACTION_TYPE,
@@ -74,6 +75,7 @@ ACTION_KEYS = [
     DIRECTION,
     APP_NAME,
     GOAL_STATUS,
+    TARGET,
 ]
 
 
@@ -101,6 +103,8 @@ class JSONAction:
       simply taping, ensuring precise control over navigation and selection in
       the interface.
     clear_text: Whether to clear the text field before typing.
+    target: UI State Compiler action id, e.g. "A0". Agents resolve this into
+      coordinates before env actuation.
   """
 
   action_type: Optional[str] = None
@@ -113,14 +117,24 @@ class JSONAction:
   app_name: Optional[str] = None
   keycode: Optional[str] = None
   clear_text: Optional[bool] = None
+  target: Optional[str] = None
+  target_bounds: Optional[list[int]] = None
 
   def __post_init__(self):
     if self.action_type not in _ACTION_TYPES:
       raise ValueError(f'Invalid action type: {self.action_type}')
     if self.index is not None:
       self.index = int(self.index)
+      if self.x is not None or self.y is not None or self.target is not None:
+        raise ValueError(
+            'Only one of index, target, or <x, y> should be provided.'
+        )
+    if self.target is not None:
+      self.target = str(self.target)
       if self.x is not None or self.y is not None:
-        raise ValueError('Either an index or a <x, y> should be provided.')
+        raise ValueError(
+            'Only one of index, target, or <x, y> should be provided.'
+        )
     if self.direction and self.direction not in _SCROLL_DIRECTIONS:
       raise ValueError(f'Invalid scroll direction: {self.direction}')
     if self.text is not None and not isinstance(self.text, str):
@@ -195,6 +209,8 @@ def _compare_actions(a: JSONAction, b: JSONAction) -> bool:
       and a.index == b.index
       and a.x == b.x
       and a.y == b.y
+      and a.target == b.target
+      and a.target_bounds == b.target_bounds
       and a.keycode == b.keycode
       and a.direction == b.direction
       and a.goal_status == b.goal_status

@@ -11,12 +11,14 @@ UI_STATE_IR_OUTPUT ?= data/ui_state_prompt_ir
 UI_STATE_IR_APPS ?=
 UI_STATE_IR_ARGS ?=
 UI_STATE_IR_APP_ARGS = $(if $(strip $(UI_STATE_IR_APPS)),--apps $(UI_STATE_IR_APPS),)
+UI_STATE_MODE ?= legacy
 
 # TASK ?= ContactsAddContact
 FIRST_K_TASKS ?= 0
 TASKS_ARG = $(if $(TASK),--tasks=$(TASK),)
 CHECKPOINT_DIR ?= runs/debug_contacts
 PROMPT_DATA_OUT ?= runs/prompts.jsonl
+RUNTIME_PROMPT_OUT ?= runs/runtime_prompts.jsonl
 LLM_CONFIG ?= configs/bailian.example.json
 # LLM_CONFIG ?= configs/deepseek.example.json
 CONSOLE_PORT ?= 5554
@@ -28,7 +30,8 @@ MAX_STEPS ?= 20
 	ui-state-dataset ui-state-kv ui-state-kv-resume ui-state-kv-test \
 	ui-state-analyze ui-state-analyze-test \
 	install-apps emulator check-emulator estimate-kv collect-a11y \
-	ir ir-clean compile-ui-state-ir compile-ui-state-ir-clean compile
+	ir ir-clean compile-ui-state-ir compile-ui-state-ir-clean compile \
+	collect-ui-state compare-ui-state
 
 help:
 	@echo "Targets:"
@@ -48,6 +51,7 @@ help:
 	@echo "  make collect-a11y          Collect raw A11y trees and screenshots"
 	@echo "  make ir                    Build exploratory UI-state IR candidates"
 	@echo "  make compile-ui-state-ir   Compile raw A11y trees into prompt-oriented UI IR"
+	@echo "  make collect-ui-state      Run collection with UI State Compiler enabled"
 
 estimate-kv:
 	$(NLP_PYTHON) scripts/estimate_kv_cache_size.py \
@@ -113,8 +117,16 @@ collect:
 		--console_port=$(CONSOLE_PORT) \
 		--grpc_port=$(GRPC_PORT) \
 		--max_steps=$(MAX_STEPS) \
+		--ui_state_mode=$(UI_STATE_MODE) \
 		--prompt_data_out=$(PROMPT_DATA_OUT) \
-		--runtime_prompt_out=runs/runtime_prompts.jsonl
+		--runtime_prompt_out=$(RUNTIME_PROMPT_OUT)
+
+collect-ui-state:
+	@$(MAKE) collect UI_STATE_MODE=compiled
+
+compare-ui-state:
+	@$(MAKE) collect UI_STATE_MODE=legacy PROMPT_DATA_OUT=runs/prompts_legacy.jsonl RUNTIME_PROMPT_OUT=runs/runtime_prompts_legacy.jsonl
+	@$(MAKE) collect UI_STATE_MODE=compiled PROMPT_DATA_OUT=runs/prompts_compiled.jsonl RUNTIME_PROMPT_OUT=runs/runtime_prompts_compiled.jsonl
 
 install-apps:
 	@$(ANDROID-WORLD_PYTHON) scripts/install_all_apps.py \

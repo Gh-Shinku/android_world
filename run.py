@@ -39,6 +39,8 @@ from android_world.agents import seeact
 from android_world.agents import t3a
 from android_world.env import env_launcher
 from android_world.env import interface
+from android_world.ui_state import compiler as ui_state_compiler
+from android_world.ui_state import provider as ui_state_provider
 
 logging.set_verbosity(logging.WARNING)
 
@@ -176,6 +178,22 @@ _LLM_CONFIG_PATH = flags.DEFINE_string(
     '',
     'Path to a JSON config file for provider-specific LLM settings.',
 )
+_UI_STATE_MODE = flags.DEFINE_enum(
+    'ui_state_mode',
+    'legacy',
+    ['legacy', 'compiled'],
+    'UI state representation used by T3A/M3A agents.',
+)
+_UI_STATE_INCLUDE_SYSTEM_UI = flags.DEFINE_boolean(
+    'ui_state_include_system_ui',
+    False,
+    'Whether compiled UI state keeps pure system UI surfaces.',
+)
+_UI_STATE_INCLUDE_INVISIBLE = flags.DEFINE_boolean(
+    'ui_state_include_invisible',
+    False,
+    'Whether compiled UI state keeps invisible elements.',
+)
 
 _FIXED_TASK_SEED = flags.DEFINE_boolean(
     'fixed_task_seed',
@@ -267,6 +285,16 @@ def _get_agent(
   print('Initializing agent...')
   agent = None
   llm_config = _load_llm_config()
+  compiled_ui_state_provider = ui_state_provider.CompiledUiStateProvider(
+      ui_state_compiler.UiStateCompilerConfig(
+          include_system_ui=_UI_STATE_INCLUDE_SYSTEM_UI.value,
+          include_invisible=_UI_STATE_INCLUDE_INVISIBLE.value,
+      )
+  )
+  use_compiled_ui_state = _UI_STATE_MODE.value == 'compiled' or _AGENT_NAME.value in (
+      't3a_ui_state_openai_compatible',
+      'm3a_ui_state_openai_compatible',
+  )
   if _AGENT_NAME.value == 'human_agent':
     agent = human_agent.HumanAgent(env)
   elif _AGENT_NAME.value == 'random_agent':
@@ -274,22 +302,60 @@ def _get_agent(
   # Gemini.
   elif _AGENT_NAME.value == 'm3a_gemini_gcp':
     agent = m3a.M3A(
-        env, infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest')
+        env,
+        infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest'),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
     )
   elif _AGENT_NAME.value == 't3a_gemini_gcp':
     agent = t3a.T3A(
-        env, infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest')
+        env,
+        infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest'),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
     )
   # GPT.
   elif _AGENT_NAME.value == 't3a_gpt4':
-    agent = t3a.T3A(env, infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'))
+    agent = t3a.T3A(
+        env,
+        infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
+    )
   elif _AGENT_NAME.value == 'm3a_gpt4v':
-    agent = m3a.M3A(env, infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'))
+    agent = m3a.M3A(
+        env,
+        infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
+    )
   # OpenAI-compatible APIs.
-  elif _AGENT_NAME.value == 't3a_openai_compatible':
-    agent = t3a.T3A(env, _get_openai_compatible_wrapper(llm_config))
-  elif _AGENT_NAME.value == 'm3a_openai_compatible':
-    agent = m3a.M3A(env, _get_openai_compatible_wrapper(llm_config))
+  elif _AGENT_NAME.value in (
+      't3a_openai_compatible',
+      't3a_ui_state_openai_compatible',
+  ):
+    agent = t3a.T3A(
+        env,
+        _get_openai_compatible_wrapper(llm_config),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
+    )
+  elif _AGENT_NAME.value in (
+      'm3a_openai_compatible',
+      'm3a_ui_state_openai_compatible',
+  ):
+    agent = m3a.M3A(
+        env,
+        _get_openai_compatible_wrapper(llm_config),
+        ui_state_provider=compiled_ui_state_provider
+        if use_compiled_ui_state
+        else None,
+    )
   # SeeAct.
   elif _AGENT_NAME.value == 'seeact':
     agent = seeact.SeeAct(env)

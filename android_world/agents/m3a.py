@@ -24,6 +24,8 @@ from android_world.agents import m3a_utils
 from android_world.env import interface
 from android_world.env import json_action
 from android_world.env import representation_utils
+from android_world.ui_state import action_resolver
+from android_world.ui_state import provider as ui_state_provider_lib
 
 PROMPT_PREFIX = (
     'You are an agent who can operate an Android phone on behalf of a user.'
@@ -168,6 +170,50 @@ ACTION_SELECTION_PROMPT_TEMPLATE = (
     'Your Answer:\n'
 )
 
+COMPILED_PROMPT_PREFIX = (
+    'You are an agent who can operate an Android phone on behalf of a user.'
+    " Based on user's goal/request, you may answer questions or complete tasks"
+    ' step by step on the phone.\n\n'
+    'At each step, you will be given the current screenshot and a compiled UI'
+    ' state. The compiled UI state contains high-level groups, contextual text,'
+    ' and executable actions. Only actions listed under Actions can be directly'
+    ' targeted. For targeted actions, use the action id such as "A0" in the'
+    ' JSON field "target".\n'
+    '- If the task is completed:'
+    ' `{{"action_type": "status", "goal_status": "complete"}}`\n'
+    '- If the task is infeasible:'
+    ' `{{"action_type": "status", "goal_status": "infeasible"}}`\n'
+    '- Answer a question: `{{"action_type": "answer", "text": "<answer_text>"}}`\n'
+    '- Click/tap a listed action:'
+    ' `{{"action_type": "click", "target": "A0"}}`\n'
+    '- Long press a listed action:'
+    ' `{{"action_type": "long_press", "target": "A0"}}`\n'
+    '- Type into a listed input action:'
+    ' `{{"action_type": "input_text", "text": <text_input>, "target": "A0"}}`\n'
+    '- Scroll the screen or a listed scroll action:'
+    ' `{{"action_type": "scroll", "direction": <up, down, left, right>,'
+    ' "target": "<optional_action_id>"}}`\n'
+    '- Press Enter: `{{"action_type": "keyboard_enter"}}`\n'
+    '- Navigate home: `{{"action_type": "navigate_home"}}`\n'
+    '- Navigate back: `{{"action_type": "navigate_back"}}`\n'
+    '- Open an app: `{{"action_type": "open_app", "app_name": <name>}}`\n'
+    '- Wait: `{{"action_type": "wait"}}`\n'
+)
+
+COMPILED_ACTION_SELECTION_PROMPT_TEMPLATE = (
+    COMPILED_PROMPT_PREFIX
+    + '\nThe current user goal/request is: {goal}\n\n'
+    'Here is a history of what you have done so far:\n{history}\n\n'
+    'The current screenshot is also given to you.\n'
+    'Here is the compiled UI state for the current screen:\n{ui_state}\n'
+    + GUIDANCE
+    + '{additional_guidelines}'
+    + '\nNow output an action from the above list in the correct JSON format,'
+    ' following the reason why you do that. Your answer should look like:\n'
+    'Reason: ...\nAction: {{"action_type":...}}\n\n'
+    'Your Answer:\n'
+)
+
 
 SUMMARY_PROMPT_TEMPLATE = (
     PROMPT_PREFIX
@@ -303,6 +349,31 @@ def _action_selection_prompt(
   )
 
 
+def _compiled_action_selection_prompt(
+    goal: str,
+    history: list[str],
+    ui_state: str,
+    additional_guidelines: list[str] | None = None,
+) -> str:
+  if history:
+    history_text = '\n'.join(history)
+  else:
+    history_text = 'You just started, no action has been performed yet.'
+
+  extra_guidelines = ''
+  if additional_guidelines:
+    extra_guidelines = 'For The Current Task:\n'
+    for guideline in additional_guidelines:
+      extra_guidelines += f'- {guideline}\n'
+
+  return COMPILED_ACTION_SELECTION_PROMPT_TEMPLATE.format(
+      goal=goal,
+      history=history_text,
+      ui_state=ui_state if ui_state else 'Not available',
+      additional_guidelines=extra_guidelines,
+  )
+
+
 def _summarize_prompt(
     action: str,
     reason: str,
@@ -340,6 +411,9 @@ class M3A(base_agent.EnvironmentInteractingAgent):
       llm: infer.MultimodalLlmWrapper,
       name: str = 'M3A',
       wait_after_action_seconds: float = 2.0,
+      ui_state_provider: ui_state_provider_lib.LegacyUiStateProvider
+      | ui_state_provider_lib.CompiledUiStateProvider
+      | None = None,
   ):
     """Initializes a M3A Agent.
 
@@ -355,6 +429,9 @@ class M3A(base_agent.EnvironmentInteractingAgent):
     self.history = []
     self.additional_guidelines = None
     self.wait_after_action_seconds = wait_after_action_seconds
+    self.ui_state_provider = ui_state_provider or ui_state_provider_lib.LegacyUiStateProvider(
+        _generate_ui_elements_description_list
+    )
 
   def set_task_guidelines(self, task_guidelines: list[str]) -> None:
     self.additional_guidelines = task_guidelines
@@ -379,6 +456,12 @@ class M3A(base_agent.EnvironmentInteractingAgent):
         'summary_prompt': None,
         'summary': None,
         'summary_raw_response': None,
+        'ui_state_mode': None,
+        'before_ui_state_text': None,
+        'before_compiled_ui_state': None,
+        'before_action_map': None,
+        'resolved_action': None,
+        'ui_state_compile_report': None,
     }
     logging.info('----------step %s----------', str(len(self.history) + 1))
 
@@ -392,29 +475,52 @@ class M3A(base_agent.EnvironmentInteractingAgent):
     before_ui_elements_list = _generate_ui_elements_description_list(
         before_ui_elements, logical_screen_size
     )
+    activity = self.env.foreground_activity_name
+    ui_state_view = self.ui_state_provider.build(
+        state,
+        screen_size=logical_screen_size,
+        app_name=activity.split('/')[0] if activity else '',
+        activity=activity,
+    )
+    step_data['ui_state_mode'] = ui_state_view.mode
+    step_data['before_ui_state_text'] = ui_state_view.prompt_text
+    step_data['before_action_map'] = ui_state_view.action_map
+    if ui_state_view.compiled is not None:
+      step_data['before_compiled_ui_state'] = ui_state_view.compiled.compiled_ir
+      step_data['ui_state_compile_report'] = ui_state_view.compiled.compile_report
     step_data['raw_screenshot'] = state.pixels.copy()
     before_screenshot = state.pixels.copy()
-    for index, ui_element in enumerate(before_ui_elements):
-      if m3a_utils.validate_ui_element(ui_element, logical_screen_size):
-        m3a_utils.add_ui_element_mark(
-            before_screenshot,
-            ui_element,
-            index,
-            logical_screen_size,
-            physical_frame_boundary,
-            orientation,
-        )
+    if ui_state_view.mode == 'legacy':
+      for index, ui_element in enumerate(before_ui_elements):
+        if m3a_utils.validate_ui_element(ui_element, logical_screen_size):
+          m3a_utils.add_ui_element_mark(
+              before_screenshot,
+              ui_element,
+              index,
+              logical_screen_size,
+              physical_frame_boundary,
+              orientation,
+          )
     step_data['before_screenshot_with_som'] = before_screenshot.copy()
 
-    action_prompt = _action_selection_prompt(
-        goal,
-        [
-            'Step ' + str(i + 1) + '- ' + step_info['summary']
-            for i, step_info in enumerate(self.history)
-        ],
-        before_ui_elements_list,
-        self.additional_guidelines,
-    )
+    history = [
+        'Step ' + str(i + 1) + '- ' + step_info['summary']
+        for i, step_info in enumerate(self.history)
+    ]
+    if ui_state_view.mode == 'compiled':
+      action_prompt = _compiled_action_selection_prompt(
+          goal,
+          history,
+          ui_state_view.prompt_text,
+          self.additional_guidelines,
+      )
+    else:
+      action_prompt = _action_selection_prompt(
+          goal,
+          history,
+          before_ui_elements_list,
+          self.additional_guidelines,
+      )
     step_data['action_prompt'] = action_prompt
     action_output, is_safe, raw_response = self.llm.predict_mm(
         action_prompt,
@@ -477,7 +583,23 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
 
     action_index = converted_action.index
     num_ui_elements = len(before_ui_elements)
+    if ui_state_view.mode == 'compiled' and converted_action.target:
+      try:
+        converted_action = action_resolver.CompiledActionResolver(
+            ui_state_view.action_map
+        ).resolve(converted_action)
+        step_data['resolved_action'] = converted_action.as_dict()
+        action_index = converted_action.index
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        step_data['summary'] = (
+            'Can not resolve the UI-state target to an executable action: '
+            + str(e)
+        )
+        self.history.append(step_data)
+        return base_agent.AgentInteractionResult(False, step_data)
     if (
+        ui_state_view.mode == 'legacy'
+        and
         converted_action.action_type
         in ['click', 'long_press', 'input_text', 'scroll']
         and action_index is not None

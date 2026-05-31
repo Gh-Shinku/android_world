@@ -373,21 +373,21 @@ def _append_runtime_prompt_jsonl(
     prompt: str,
     prompt_kind: str,
     step_number: int,
+    **extra_fields: Any,
 ) -> None:
   """Appends one exact runtime LLM prompt record."""
-  _append_jsonl(
-      output_path,
-      {
-          constants.EpisodeConstants.TASK_TEMPLATE: task_template,
-          constants.EpisodeConstants.INSTANCE_ID: instance_id,
-          constants.EpisodeConstants.AGENT_NAME: agent_name,
-          constants.EpisodeConstants.GOAL: goal,
-          constants.STEP_NUMBER: step_number,
-          'prompt_kind': prompt_kind,
-          'prompt_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
-          'prompt': prompt,
-      },
-  )
+  record = {
+      constants.EpisodeConstants.TASK_TEMPLATE: task_template,
+      constants.EpisodeConstants.INSTANCE_ID: instance_id,
+      constants.EpisodeConstants.AGENT_NAME: agent_name,
+      constants.EpisodeConstants.GOAL: goal,
+      constants.STEP_NUMBER: step_number,
+      'prompt_kind': prompt_kind,
+      'prompt_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+      'prompt': prompt,
+  }
+  record.update(extra_fields)
+  _append_jsonl(output_path, record)
 
 
 def _create_prompt_data_item(

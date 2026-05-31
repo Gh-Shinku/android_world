@@ -138,12 +138,19 @@ def execute_adb_action(
   elif action.action_type == 'scroll':
 
     screen_width, screen_height = screen_size
-    if action.index:
+    if action.index is not None:
       x_min, y_min, x_max, y_max = (
           max(screen_elements[action.index].bbox_pixels.x_min, 0),
           max(screen_elements[action.index].bbox_pixels.y_min, 0),
           min(screen_elements[action.index].bbox_pixels.x_max, screen_width),
           min(screen_elements[action.index].bbox_pixels.y_max, screen_height),
+      )
+    elif action.target_bounds is not None:
+      x_min, y_min, x_max, y_max = (
+          max(action.target_bounds[0], 0),
+          max(action.target_bounds[1], 0),
+          min(action.target_bounds[2], screen_width),
+          min(action.target_bounds[3], screen_height),
       )
     else:
       x_min, y_min, x_max, y_max = (0, 0, screen_width, screen_height)

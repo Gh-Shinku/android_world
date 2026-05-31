@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Source-agnostic UI state IR used by prompt compiler scripts."""
+"""Source-agnostic UI state IR."""
 
 from __future__ import annotations
 
@@ -82,10 +81,23 @@ class ScreenIR:
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+@dataclasses.dataclass
+class CompiledUiState:
+  screen_ir: ScreenIR
+  optimized_ir: ScreenIR
+  compiled_ir: dict[str, Any]
+  prompt: str
+  action_map: dict[str, dict[str, Any]]
+  compile_report: dict[str, Any]
+  sufficiency_report: dict[str, Any]
+
+
 def to_jsonable(value: Any, *, include_source_refs: bool = True) -> Any:
   """Converts IR dataclasses into JSON-compatible values."""
   if dataclasses.is_dataclass(value):
-    return to_jsonable(dataclasses.asdict(value), include_source_refs=include_source_refs)
+    return to_jsonable(
+        dataclasses.asdict(value), include_source_refs=include_source_refs
+    )
   if isinstance(value, dict):
     result = {}
     for key, item in value.items():
