@@ -58,14 +58,25 @@ def _state_from_node(node: Any) -> set[str]:
 
 def _ops_from_node(node: Any) -> list[str]:
   ops = []
-  if node.is_clickable or node.is_checkable:
-    ops.append('click')
-  if node.is_long_clickable:
-    ops.append('long_press')
+  class_name = _short_class_name(node.class_name).lower()
+  resource_key = _short_resource_name(
+      node.view_id_resource_name, node.package_name
+  )
   if node.is_editable:
     ops.append('input_text')
   if node.is_scrollable:
     ops.append('scroll')
+  is_ambiguous_text_click = (
+      'text' in class_name
+      and node.is_clickable
+      and not node.is_checkable
+      and not node.content_description
+      and resource_key.startswith('txt_')
+  )
+  if (node.is_clickable or node.is_checkable) and not is_ambiguous_text_click:
+    ops.append('click')
+  if node.is_long_clickable:
+    ops.append('long_press')
   return ops
 
 
@@ -75,10 +86,12 @@ def _role_from_node(node: Any) -> str:
     return 'input'
   if node.is_scrollable:
     return 'scroll'
-  if 'button' in class_name or node.is_clickable:
+  if 'button' in class_name:
     return 'button'
   if 'text' in class_name:
     return 'text'
+  if node.is_clickable:
+    return 'button'
   if 'image' in class_name:
     return 'image'
   if 'list' in class_name or 'recycler' in class_name:
@@ -102,6 +115,8 @@ def _label(
     resource_key: str,
     role: str,
 ) -> str:
+  if not text and resource_key.startswith('btn_'):
+    return resource_key
   for value in (text, description, hint, resource_key):
     if value:
       return value

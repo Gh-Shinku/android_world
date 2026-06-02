@@ -186,12 +186,32 @@ COMPILED_PROMPT_PREFIX = (
     '- Wait: `{{"action_type": "wait"}}`\n'
 )
 
+COMPILED_GUIDANCE = (
+    'Here are some useful guidelines you need to follow:\n'
+    'General\n'
+    '- Pick the easiest reliable action that advances the goal. If an action'
+    ' does not work as expected, use the history to avoid repeating the same'
+    ' failed action.\n'
+    '- If the desired state is already achieved, finish with complete status.\n'
+    'Action Related\n'
+    '- For `click`, `long_press`, `input_text`, and targeted `scroll`, the'
+    ' `target` value must be one of the action ids currently listed under'
+    ' Actions, such as "A0".\n'
+    '- Use `input_text` directly on an input action; it already focuses the'
+    ' field before typing.\n'
+    '- If the current field is filled and the next required field is visible,'
+    ' move on to that next field instead of typing into the same field again.\n'
+    '- Use `open_app` whenever you need to open an app; do not use the app'
+    ' drawer unless other methods fail.\n'
+    '- Consider scrolling when required content or fields are not visible.\n'
+)
+
 COMPILED_ACTION_SELECTION_PROMPT_TEMPLATE = (
     COMPILED_PROMPT_PREFIX
     + '\nThe current user goal/request is: {goal}'
     + '\n\nHere is a history of what you have done so far:\n{history}'
     + '\n\nHere is the compiled UI state for the current screen:\n{ui_state}\n'
-    + GUIDANCE
+    + COMPILED_GUIDANCE
     + '{additional_guidelines}'
     + '\n\nNow output an action from the above list in the correct JSON format,'
     ' following the reason why you do that. Your answer should look like:\n'
