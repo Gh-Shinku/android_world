@@ -20,6 +20,7 @@ from typing import Any
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+from android_world import benchmark_state
 from android_world import checkpointer
 from android_world import constants
 from android_world import episode_runner
@@ -710,6 +711,150 @@ class RunTaskSuiteTest(absltest.TestCase):
         suite2, mock_run_e2e, mock_env, mock_checkpointer
     )
     self.assertLen(result2, 1)
+
+  @mock.patch.object(time, 'sleep', autospec=True)
+  @mock.patch.object(interface, 'AsyncAndroidEnv')
+  @mock.patch.object(adb_utils, 'send_android_intent')
+  @mock.patch.object(checkpointer, 'Checkpointer')
+  def test_benchmark_state_runs_only_fail_records(
+      self,
+      mock_checkpointer,
+      unused_mock_send_android_intent,
+      mock_env,
+      unused_mock_sleep,
+  ):
+    mock_checkpointer.load.return_value = [
+        {
+            'instance_id': 0,
+            'is_successful': 1,
+            'goal': 'Current state eval',
+            'task_template': 'FakeCurrentStateEval',
+        },
+    ]
+    mock_env.get_state.return_value = (
+        dm_env.TimeStep(
+            observation={'pixels': np.zeros((3, 3, 3))},
+            reward=0,
+            discount=0,
+            step_type=dm_env.StepType.LAST,
+        ),
+        [],
+    )
+    mock_run_e2e = mock.MagicMock()
+    mock_run_e2e.side_effect = [
+        episode_runner.EpisodeResult(
+            True,
+            {'step_number': [0]},
+        ),
+        episode_runner.EpisodeResult(
+            True,
+            {'step_number': [0]},
+        ),
+    ]
+    state = benchmark_state.BenchmarkState(
+        self.create_tempfile().full_path,
+        {
+            'FakeCurrentStateEval_0': benchmark_state.SUCCESS,
+            'FakeCurrentStateEval_1': benchmark_state.FAIL,
+            'FakeAdbEval_0': benchmark_state.FAIL,
+        },
+    )
+    suite = suite_utils.Suite(
+        **{
+            'FakeCurrentStateEval': [
+                test_utils.FakeCurrentStateEval(
+                    test_utils.FakeCurrentStateEval.generate_random_params()
+                ),
+                test_utils.FakeCurrentStateEval(
+                    test_utils.FakeCurrentStateEval.generate_random_params()
+                ),
+            ],
+            'FakeAdbEval': [
+                test_utils.FakeAdbEval(
+                    test_utils.FakeAdbEval.generate_random_params()
+                )
+            ],
+        },
+    )
+    suite.suite_family = 'android'
+
+    suite_utils._run_task_suite(
+        suite,
+        mock_run_e2e,
+        mock_env,
+        mock_checkpointer,
+        benchmark_state=state,
+    )
+
+    self.assertEqual(mock_run_e2e.call_count, 2)
+    self.assertEqual(state.state['FakeCurrentStateEval_0'], benchmark_state.SUCCESS)
+    self.assertEqual(state.state['FakeCurrentStateEval_1'], benchmark_state.SUCCESS)
+    self.assertEqual(state.state['FakeAdbEval_0'], benchmark_state.SUCCESS)
+    mock_checkpointer.save_episodes.assert_has_calls(
+        [
+            mock.call(mock.ANY, 'FakeCurrentStateEval_1'),
+            mock.call(mock.ANY, 'FakeAdbEval_0'),
+        ],
+        any_order=False,
+    )
+
+  @mock.patch.object(time, 'sleep', autospec=True)
+  @mock.patch.object(interface, 'AsyncAndroidEnv')
+  @mock.patch.object(adb_utils, 'send_android_intent')
+  @mock.patch.object(checkpointer, 'Checkpointer')
+  def test_benchmark_state_keeps_failed_record_fail(
+      self,
+      mock_checkpointer,
+      unused_mock_send_android_intent,
+      mock_env,
+      unused_mock_sleep,
+  ):
+    mock_checkpointer.load.return_value = []
+    mock_env.get_state.return_value = (
+        dm_env.TimeStep(
+            observation={'pixels': np.zeros((3, 3, 3))},
+            reward=0,
+            discount=0,
+            step_type=dm_env.StepType.LAST,
+        ),
+        [],
+    )
+    mock_run_e2e = mock.MagicMock()
+    mock_run_e2e.return_value = episode_runner.EpisodeResult(
+        False,
+        {'step_number': [0]},
+    )
+    state = benchmark_state.BenchmarkState(
+        self.create_tempfile().full_path,
+        {'FakeCurrentStateEval_0': benchmark_state.FAIL},
+    )
+    suite = suite_utils.Suite(
+        **{
+            'FakeCurrentStateEval': [
+                test_utils.FakeCurrentStateEval(
+                    test_utils.FakeCurrentStateEval.generate_random_params()
+                ),
+            ],
+            'FakeAdbEval': [
+                test_utils.FakeAdbEval(
+                    test_utils.FakeAdbEval.generate_random_params()
+                )
+            ],
+        },
+    )
+    suite.suite_family = 'android'
+
+    suite_utils._run_task_suite(
+        suite,
+        mock_run_e2e,
+        mock_env,
+        mock_checkpointer,
+        benchmark_state=state,
+    )
+
+    self.assertEqual(mock_run_e2e.call_count, 1)
+    self.assertEqual(state.state['FakeCurrentStateEval_0'], benchmark_state.FAIL)
+    self.assertNotIn('FakeAdbEval_0', state.state)
 
 
 if __name__ == '__main__':

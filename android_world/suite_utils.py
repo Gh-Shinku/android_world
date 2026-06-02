@@ -27,6 +27,7 @@ import traceback
 from typing import Any, Callable, Type, TypeVar
 
 from android_env import env_interface
+from android_world import benchmark_state as benchmark_state_lib
 from android_world import checkpointer as checkpointer_lib
 from android_world import constants
 from android_world import episode_runner
@@ -520,6 +521,8 @@ def _run_task_suite(
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
     configure_runtime_prompt_logger: Callable[[str, int], None] | None = None,
+    benchmark_state: benchmark_state_lib.BenchmarkState | None = None,
+    benchmark_state_autosave: bool = True,
 ) -> list[dict[str, Any]]:
   """Runs e2e system on suite.
 
@@ -540,6 +543,10 @@ def _run_task_suite(
     check_episode_fn: The function to check episode data.
     configure_runtime_prompt_logger: Optional hook to install a per-episode
       runtime prompt logger on the agent.
+    benchmark_state: Optional persistent state that only runs instances marked
+      fail and marks successful episodes as success.
+    benchmark_state_autosave: Whether to persist benchmark_state after each
+      episode.
 
   Returns:
     Metadata for each episode, including the scripted reward.
@@ -575,16 +582,24 @@ def _run_task_suite(
       instance_name = (
           instance.name + checkpointer_lib.INSTANCE_SEPARATOR + str(i)
       )
+      if benchmark_state is not None and not benchmark_state.should_run(
+          instance_name
+      ):
+        _log_and_print('Skipping benchmark state task %s', instance_name)
+        continue
+
       # Transferring from old checkpoint.
-      if instance_name in completed_tasks:
+      if benchmark_state is None and instance_name in completed_tasks:
         completed_episodes: list[dict[str, Any]] = completed_tasks[
             instance_name
         ]
         episodes_metadata.extend(completed_episodes)
-      if instance_name in failed_tasks:
+      if benchmark_state is None and instance_name in failed_tasks:
         episodes_metadata.extend(failed_tasks[instance_name])
       already_processed = (
-          instance_name in completed_tasks and instance_name not in failed_tasks
+          benchmark_state is None
+          and instance_name in completed_tasks
+          and instance_name not in failed_tasks
       )
       if already_processed:
         _log_and_print('Skipping already processed task %s', instance_name)
@@ -602,6 +617,11 @@ def _run_task_suite(
       episode[constants.EpisodeConstants.AGENT_NAME] = agent_name
       episode[constants.EpisodeConstants.INSTANCE_ID] = i
       checkpointer.save_episodes([episode], instance_name)
+      if benchmark_state is not None:
+        status = benchmark_state.mark_episode(instance_name, episode)
+        if benchmark_state_autosave:
+          benchmark_state.save()
+        _log_and_print('Benchmark state %s -> %s', instance_name, status)
       if (
           prompt_data_out
           and episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None
@@ -641,6 +661,8 @@ def run(
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
+    benchmark_state: benchmark_state_lib.BenchmarkState | None = None,
+    benchmark_state_autosave: bool = True,
 ) -> list[dict[str, Any]]:
   """Create suite and runs eval suite.
 
@@ -661,6 +683,10 @@ def run(
     process_episodes_fn: The function to process episode data. Usually to
       compute metrics. Deafaults to process_episodes from this file.
     check_episode_fn: The function to check episode data.
+    benchmark_state: Optional persistent state that only runs instances marked
+      fail and marks successful episodes as success.
+    benchmark_state_autosave: Whether to persist benchmark_state after each
+      episode.
 
   Returns:
     Step-by-step data from each episode.
@@ -725,6 +751,8 @@ def run(
       process_episodes_fn=process_episodes_fn,
       check_episode_fn=check_episode_fn,
       configure_runtime_prompt_logger=configure_runtime_prompt_logger,
+      benchmark_state=benchmark_state,
+      benchmark_state_autosave=benchmark_state_autosave,
   )
 
   return results
