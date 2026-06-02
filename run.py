@@ -17,423 +17,385 @@
 The run.py module is used to run a suite of tasks, with configurable task
 combinations, environment setups, and agent configurations. You can run specific
 tasks or all tasks in the suite and customize various settings using the
-command-line flags.
+command-line arguments.
 """
 
+import argparse
 from collections.abc import Sequence
-import json
+import logging
 import os
+from pathlib import Path
 
-from absl import app
-from absl import flags
-from absl import logging
+from android_world import benchmark_state as benchmark_state_lib
 from android_world import checkpointer as checkpointer_lib
+from android_world import config as run_config_lib
 from android_world import registry
 from android_world import suite_utils
-from android_world.agents import base_agent
-from android_world.agents import human_agent
-from android_world.agents import infer
-from android_world.agents import m3a
-from android_world.agents import random_agent
-from android_world.agents import seeact
-from android_world.agents import t3a
+from android_world.agents import factory as agent_factory
 from android_world.env import env_launcher
-from android_world.env import interface
-from android_world.ui_state import compiler as ui_state_compiler
-from android_world.ui_state import provider as ui_state_provider
 
-logging.set_verbosity(logging.WARNING)
+logging.getLogger().setLevel(logging.WARNING)
 
 os.environ['GRPC_VERBOSITY'] = 'ERROR'  # Only show errors
 os.environ['GRPC_TRACE'] = 'none'  # Disable tracing
 
 
-def _find_adb_directory() -> str:
-  """Returns the directory where adb is located."""
-  potential_paths = [
-      # os.path.expanduser('~/Library/Android/sdk/platform-tools/adb'),
-      # os.path.expanduser('~/Android/Sdk/platform-tools/adb'),
-      os.path.abspath("/home/zyt/sda_ws/programs/android/platform-tools/adb")
-  ]
-  for path in potential_paths:
-    if os.path.isfile(path):
-      return path
-  raise EnvironmentError(
-      'adb not found in the common Android SDK paths. Please install Android'
-      " SDK and ensure adb is in one of the expected directories. If it's"
-      ' already installed, point to the installed location.'
+def _parse_tasks(value: str) -> list[str] | None:
+  if not value:
+    return None
+  tasks = [task.strip() for task in value.split(',') if task.strip()]
+  return tasks or None
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+  """Builds the command line parser for benchmark runs."""
+  parser = argparse.ArgumentParser(description='Run Android World eval suite.')
+
+  parser.add_argument(
+      '--config',
+      default=argparse.SUPPRESS,
+      help='Path to a resolved RunConfig JSON. Explicit CLI args override it.',
+  )
+  parser.add_argument(
+      '--adb_path',
+      default=argparse.SUPPRESS,
+      help=(
+          'Path to adb. Defaults to ANDROID_WORLD_ADB_PATH, or lets the '
+          'environment layer resolve adb when empty.'
+      ),
+  )
+  parser.add_argument(
+      '--perform_emulator_setup',
+      action=argparse.BooleanOptionalAction,
+      default=argparse.SUPPRESS,
+      help=(
+          'Whether to perform emulator setup. This must be done once before '
+          'running Android World.'
+      ),
+  )
+  parser.add_argument(
+      '--console_port',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='The console port of the running Android device.',
+  )
+  parser.add_argument(
+      '--grpc_port',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='The gRPC port of the running Android emulator.',
   )
 
-
-_ADB_PATH = flags.DEFINE_string(
-    'adb_path',
-    _find_adb_directory(),
-    'Path to adb. Set if not installed through SDK.',
-)
-_EMULATOR_SETUP = flags.DEFINE_boolean(
-    'perform_emulator_setup',
-    False,
-    'Whether to perform emulator setup. This must be done once and only once'
-    ' before running Android World. After an emulator is setup, this flag'
-    ' should always be False.',
-)
-_DEVICE_CONSOLE_PORT = flags.DEFINE_integer(
-    'console_port',
-    5554,
-    'The console port of the running Android device. This can usually be'
-    ' retrieved by looking at the output of `adb devices`. In general, the'
-    ' first connected device is port 5554, the second is 5556, and'
-    ' so on.',
-)
-_GRPC_PORT = flags.DEFINE_integer(
-    'grpc_port',
-    8554,
-    'The gRPC port of the running Android emulator.',
-)
-
-_SUITE_FAMILY = flags.DEFINE_enum(
-    'suite_family',
-    registry.TaskRegistry.ANDROID_WORLD_FAMILY,
-    [
-        # Families from the paper.
-        registry.TaskRegistry.ANDROID_WORLD_FAMILY,
-        registry.TaskRegistry.MINIWOB_FAMILY_SUBSET,
-        # Other families for more testing.
-        registry.TaskRegistry.MINIWOB_FAMILY,
-        registry.TaskRegistry.ANDROID_FAMILY,
-        registry.TaskRegistry.INFORMATION_RETRIEVAL_FAMILY,
-    ],
-    'Suite family to run. See registry.py for more information.',
-)
-_TASK_RANDOM_SEED = flags.DEFINE_integer(
-    'task_random_seed', 30, 'Random seed for task randomness.'
-)
-
-_TASKS = flags.DEFINE_list(
-    'tasks',
-    None,
-    'List of specific tasks to run in the given suite family. If None, run all'
-    ' tasks in the suite family.',
-)
-_FIRST_K_TASKS = flags.DEFINE_integer(
-    'first_k_tasks',
-    0,
-    'Run only the first K task templates after suite filtering. If 0, run all.',
-)
-_N_TASK_COMBINATIONS = flags.DEFINE_integer(
-    'n_task_combinations',
-    1,
-    'Number of task instances to run for each task template.',
-)
-_MAX_STEPS = flags.DEFINE_integer(
-    'max_steps',
-    0,
-    'Maximum number of agent steps per episode. If 0, use task complexity.',
-)
-
-_CHECKPOINT_DIR = flags.DEFINE_string(
-    'checkpoint_dir',
-    '',
-    'The directory to save checkpoints and resume evaluation from. If the'
-    ' directory contains existing checkpoint files, evaluation will resume from'
-    ' the latest checkpoint. If the directory is empty or does not exist, a new'
-    ' directory will be created.',
-)
-_OUTPUT_PATH = flags.DEFINE_string(
-    'output_path',
-    os.path.expanduser('./runs'),
-    'The path to save results to if not resuming from a checkpoint is not'
-    ' provided.',
-)
-_PROMPT_DATA_OUT = flags.DEFINE_string(
-    'prompt_data_out',
-    '',
-    'JSONL path to write T3A action-selection prompt component data.',
-)
-_RUNTIME_PROMPT_OUT = flags.DEFINE_string(
-    'runtime_prompt_out',
-    '',
-    'JSONL path to write exact runtime T3A action-selection prompts.',
-)
-
-# Agent specific.
-_AGENT_NAME = flags.DEFINE_string('agent_name', 'm3a_gpt4v', help='Agent name.')
-_LLM_MODEL_NAME = flags.DEFINE_string(
-    'llm_model_name',
-    'gpt-4-turbo-2024-04-09',
-    'Model name for OpenAI-compatible LLM backends.',
-)
-_LLM_API_BASE_URL = flags.DEFINE_string(
-    'llm_api_base_url',
-    'https://api.openai.com/v1',
-    'Base URL for OpenAI-compatible chat completions APIs.',
-)
-_LLM_API_KEY_ENV = flags.DEFINE_string(
-    'llm_api_key_env',
-    'OPENAI_API_KEY',
-    'Environment variable containing the API key for the LLM backend.',
-)
-_LLM_CONFIG_PATH = flags.DEFINE_string(
-    'llm_config_path',
-    '',
-    'Path to a JSON config file for provider-specific LLM settings.',
-)
-_UI_STATE_MODE = flags.DEFINE_enum(
-    'ui_state_mode',
-    'legacy',
-    ['legacy', 'compiled'],
-    'UI state representation used by T3A/M3A agents.',
-)
-_UI_STATE_INCLUDE_SYSTEM_UI = flags.DEFINE_boolean(
-    'ui_state_include_system_ui',
-    False,
-    'Whether compiled UI state keeps pure system UI surfaces.',
-)
-_UI_STATE_INCLUDE_INVISIBLE = flags.DEFINE_boolean(
-    'ui_state_include_invisible',
-    False,
-    'Whether compiled UI state keeps invisible elements.',
-)
-
-_FIXED_TASK_SEED = flags.DEFINE_boolean(
-    'fixed_task_seed',
-    False,
-    'Whether to use the same task seed when running multiple task combinations'
-    ' (n_task_combinations > 1).',
-)
-
-
-# MiniWoB is very lightweight and new screens/View Hierarchy load quickly.
-_MINIWOB_TRANSITION_PAUSE = 0.2
-
-# Additional guidelines for the MiniWob tasks.
-_MINIWOB_ADDITIONAL_GUIDELINES = [
-    (
-        'This task is running in a mock app, you must stay in this app and'
-        ' DO NOT use the `navigate_home` action.'
-    ),
-]
-
-
-def _load_llm_config() -> dict[str, object]:
-  if not _LLM_CONFIG_PATH.value:
-    return {}
-  with open(_LLM_CONFIG_PATH.value, 'r', encoding='utf-8') as f:
-    return json.load(f)
-
-
-def _get_openai_compatible_wrapper(
-    config: dict[str, object],
-) -> infer.Gpt4Wrapper:
-  if not config:
-    return infer.Gpt4Wrapper(
-        _LLM_MODEL_NAME.value,
-        api_key_env=_LLM_API_KEY_ENV.value,
-        api_base_url=_LLM_API_BASE_URL.value,
-    )
-
-  api_key = config.get('api_key')
-  if api_key == '':
-    api_key = None
-  if api_key is not None and not isinstance(api_key, str):
-    raise ValueError('LLM config field "api_key" must be a string.')
-  temperature = config.get('temperature', 0.0)
-  if temperature is not None:
-    temperature = float(temperature)
-  max_tokens = config.get('max_tokens', 1000)
-  if max_tokens is not None:
-    max_tokens = int(max_tokens)
-  extra_body = config.get('extra_body', {})
-  if not isinstance(extra_body, dict):
-    raise ValueError('LLM config field "extra_body" must be an object.')
-  extra_request_kwargs = config.get('extra_request_kwargs', {})
-  if not isinstance(extra_request_kwargs, dict):
-    raise ValueError(
-        'LLM config field "extra_request_kwargs" must be an object.'
-    )
-  if extra_request_kwargs.get('stream'):
-    raise ValueError('Streaming responses are not supported by Android World.')
-
-  model_name = config.get('model')
-  if model_name is None:
-    model_name = 'gpt-4-turbo-2024-04-09'
-  api_key_env = config.get('api_key_env')
-  if api_key_env is None:
-    api_key_env = 'OPENAI_API_KEY'
-  api_base_url = config.get('base_url')
-  if api_base_url is None:
-    api_base_url = 'https://api.openai.com/v1'
-
-  return infer.Gpt4Wrapper(
-      model_name=str(model_name),
-      api_key=api_key,
-      api_key_env=str(api_key_env),
-      api_base_url=str(api_base_url),
-      max_retry=int(config.get('max_retry', 3)),
-      max_tokens=max_tokens,
-      temperature=temperature,
-      extra_body=extra_body,
-      extra_request_kwargs=extra_request_kwargs,
+  parser.add_argument(
+      '--suite_family',
+      choices=[
+          registry.TaskRegistry.ANDROID_WORLD_FAMILY,
+          registry.TaskRegistry.MINIWOB_FAMILY_SUBSET,
+          registry.TaskRegistry.MINIWOB_FAMILY,
+          registry.TaskRegistry.ANDROID_FAMILY,
+          registry.TaskRegistry.INFORMATION_RETRIEVAL_FAMILY,
+      ],
+      default=argparse.SUPPRESS,
+      help='Suite family to run. See registry.py for more information.',
+  )
+  parser.add_argument(
+      '--task_random_seed',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='Random seed for task randomness.',
+  )
+  parser.add_argument(
+      '--tasks',
+      type=_parse_tasks,
+      default=argparse.SUPPRESS,
+      help=(
+          'Comma-separated list of tasks to run in the given suite family. If '
+          'omitted, run all tasks in the suite family.'
+      ),
+  )
+  parser.add_argument(
+      '--first_k_tasks',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='Run only the first K task templates after suite filtering.',
+  )
+  parser.add_argument(
+      '--n_task_combinations',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='Number of task instances to run for each task template.',
+  )
+  parser.add_argument(
+      '--max_steps',
+      type=int,
+      default=argparse.SUPPRESS,
+      help='Maximum number of agent steps per episode. If 0, use complexity.',
+  )
+  parser.add_argument(
+      '--fixed_task_seed',
+      action=argparse.BooleanOptionalAction,
+      default=argparse.SUPPRESS,
+      help='Use the same task seed across task combinations.',
   )
 
+  parser.add_argument(
+      '--checkpoint_dir',
+      default=argparse.SUPPRESS,
+      help='Directory to save checkpoints and resume evaluation from.',
+  )
+  parser.add_argument(
+      '--output_path',
+      default=argparse.SUPPRESS,
+      help='Path to save results to when checkpoint_dir is not provided.',
+  )
+  parser.add_argument(
+      '--prompt_data_out',
+      default=argparse.SUPPRESS,
+      help='JSONL path to write T3A action-selection prompt component data.',
+  )
+  parser.add_argument(
+      '--runtime_prompt_out',
+      default=argparse.SUPPRESS,
+      help='JSONL path to write exact runtime T3A action-selection prompts.',
+  )
+  parser.add_argument(
+      '--benchmark_state',
+      default=argparse.SUPPRESS,
+      help=(
+          'Line-based path containing TaskName_instance -> true/false state. '
+          'If set, only instances marked false are run.'
+      ),
+  )
+  parser.add_argument(
+      '--benchmark_state_init_from',
+      default=argparse.SUPPRESS,
+      help='Checkpoint run directory used to initialize benchmark_state.',
+  )
+  parser.add_argument(
+      '--benchmark_state_autosave',
+      action=argparse.BooleanOptionalAction,
+      default=argparse.SUPPRESS,
+      help='Whether to save benchmark_state after every episode.',
+  )
 
-def _get_agent(
-    env: interface.AsyncEnv,
-    family: str | None = None,
-) -> base_agent.EnvironmentInteractingAgent:
-  """Gets agent."""
-  print('Initializing agent...')
-  agent = None
-  llm_config = _load_llm_config()
-  compiled_ui_state_provider = ui_state_provider.CompiledUiStateProvider(
-      ui_state_compiler.UiStateCompilerConfig(
-          include_system_ui=_UI_STATE_INCLUDE_SYSTEM_UI.value,
-          include_invisible=_UI_STATE_INCLUDE_INVISIBLE.value,
+  parser.add_argument(
+      '--agent_name',
+      default=argparse.SUPPRESS,
+      help='Agent name.',
+  )
+  parser.add_argument(
+      '--llm_model_name',
+      default=argparse.SUPPRESS,
+      help='Model name for OpenAI-compatible LLM backends.',
+  )
+  parser.add_argument(
+      '--llm_api_base_url',
+      default=argparse.SUPPRESS,
+      help='Base URL for OpenAI-compatible chat completions APIs.',
+  )
+  parser.add_argument(
+      '--llm_api_key_env',
+      default=argparse.SUPPRESS,
+      help='Environment variable containing the LLM backend API key.',
+  )
+  parser.add_argument(
+      '--llm_config_path',
+      default=argparse.SUPPRESS,
+      help='Path to a JSON config file for provider-specific LLM settings.',
+  )
+  parser.add_argument(
+      '--ui_state_mode',
+      choices=['legacy', 'compiled'],
+      default=argparse.SUPPRESS,
+      help='UI state representation used by T3A/M3A agents.',
+  )
+  parser.add_argument(
+      '--ui_state_include_system_ui',
+      action=argparse.BooleanOptionalAction,
+      default=argparse.SUPPRESS,
+      help='Whether compiled UI state keeps pure system UI surfaces.',
+  )
+  parser.add_argument(
+      '--ui_state_include_invisible',
+      action=argparse.BooleanOptionalAction,
+      default=argparse.SUPPRESS,
+      help='Whether compiled UI state keeps invisible elements.',
+  )
+  return parser
+
+
+def _apply_arg_overrides(
+    config: run_config_lib.RunConfig,
+    overrides: argparse.Namespace | dict[str, object],
+) -> None:
+  values = vars(overrides) if isinstance(overrides, argparse.Namespace) else overrides
+
+  if 'adb_path' in values:
+    config.env.adb_path = str(values['adb_path'])
+  if 'perform_emulator_setup' in values:
+    config.env.perform_emulator_setup = bool(values['perform_emulator_setup'])
+  if 'console_port' in values:
+    config.env.console_port = int(values['console_port'])
+  if 'grpc_port' in values:
+    config.env.grpc_port = int(values['grpc_port'])
+
+  if 'suite_family' in values:
+    config.suite.family = str(values['suite_family'])
+  if 'task_random_seed' in values:
+    config.suite.task_random_seed = int(values['task_random_seed'])
+  if 'tasks' in values:
+    config.suite.tasks = values['tasks']  # type: ignore[assignment]
+  if 'first_k_tasks' in values:
+    config.suite.first_k_tasks = int(values['first_k_tasks'])
+  if 'n_task_combinations' in values:
+    config.suite.n_task_combinations = int(values['n_task_combinations'])
+  if 'max_steps' in values:
+    config.suite.max_steps = int(values['max_steps']) or None
+  if 'fixed_task_seed' in values:
+    config.suite.fixed_task_seed = bool(values['fixed_task_seed'])
+
+  if 'checkpoint_dir' in values:
+    config.output.checkpoint_dir = str(values['checkpoint_dir'])
+  if 'output_path' in values:
+    config.output.output_path = str(values['output_path'])
+  if 'prompt_data_out' in values:
+    config.output.prompt_data_out = str(values['prompt_data_out'])
+  if 'runtime_prompt_out' in values:
+    config.output.runtime_prompt_out = str(values['runtime_prompt_out'])
+  if 'benchmark_state' in values:
+    config.output.benchmark_state = str(values['benchmark_state'])
+  if 'benchmark_state_init_from' in values:
+    config.output.benchmark_state_init_from = str(
+        values['benchmark_state_init_from']
+    )
+  if 'benchmark_state_autosave' in values:
+    config.output.benchmark_state_autosave = bool(
+        values['benchmark_state_autosave']
+    )
+
+  if 'agent_name' in values:
+    config.agent.name = str(values['agent_name'])
+  if 'llm_model_name' in values:
+    config.agent.llm.model_name = str(values['llm_model_name'])
+  if 'llm_api_base_url' in values:
+    config.agent.llm.api_base_url = str(values['llm_api_base_url'])
+  if 'llm_api_key_env' in values:
+    config.agent.llm.api_key_env = str(values['llm_api_key_env'])
+  if 'ui_state_mode' in values:
+    config.agent.ui_state_mode = str(values['ui_state_mode'])
+  if 'ui_state_include_system_ui' in values:
+    config.agent.ui_state_include_system_ui = bool(
+        values['ui_state_include_system_ui']
+    )
+  if 'ui_state_include_invisible' in values:
+    config.agent.ui_state_include_invisible = bool(
+        values['ui_state_include_invisible']
+    )
+
+
+def _build_run_config(args: argparse.Namespace) -> run_config_lib.RunConfig:
+  values = vars(args)
+  if 'config' in values:
+    config = run_config_lib.RunConfig.from_json(str(values['config']))
+  else:
+    config = run_config_lib.RunConfig()
+  _apply_arg_overrides(config, args)
+
+  if 'llm_config_path' in values:
+    config.agent.llm = run_config_lib.LLMConfig.from_provider_json(
+        str(values['llm_config_path'])
+    )
+  return config
+
+
+def _get_benchmark_state(
+    output_config: run_config_lib.OutputConfig,
+) -> benchmark_state_lib.BenchmarkState | None:
+  if not output_config.benchmark_state:
+    return None
+
+  state_path = Path(output_config.benchmark_state).resolve()
+  if not state_path.exists():
+    if not output_config.benchmark_state_init_from:
+      raise ValueError(
+          '--benchmark_state does not exist. Provide '
+          '--benchmark_state_init_from to initialize it.'
       )
-  )
-  use_compiled_ui_state = _UI_STATE_MODE.value == 'compiled' or _AGENT_NAME.value in (
-      't3a_ui_state_openai_compatible',
-      'm3a_ui_state_openai_compatible',
-  )
-  if _AGENT_NAME.value == 'human_agent':
-    agent = human_agent.HumanAgent(env)
-  elif _AGENT_NAME.value == 'random_agent':
-    agent = random_agent.RandomAgent(env)
-  # Gemini.
-  elif _AGENT_NAME.value == 'm3a_gemini_gcp':
-    agent = m3a.M3A(
-        env,
-        infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest'),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
+    state = benchmark_state_lib.state_from_run_dir(
+        Path(output_config.benchmark_state_init_from).resolve()
     )
-  elif _AGENT_NAME.value == 't3a_gemini_gcp':
-    agent = t3a.T3A(
-        env,
-        infer.GeminiGcpWrapper(model_name='gemini-1.5-pro-latest'),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
-    )
-  # GPT.
-  elif _AGENT_NAME.value == 't3a_gpt4':
-    agent = t3a.T3A(
-        env,
-        infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
-    )
-  elif _AGENT_NAME.value == 'm3a_gpt4v':
-    agent = m3a.M3A(
-        env,
-        infer.Gpt4Wrapper('gpt-4-turbo-2024-04-09'),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
-    )
-  # OpenAI-compatible APIs.
-  elif _AGENT_NAME.value in (
-      't3a_openai_compatible',
-      't3a_ui_state_openai_compatible',
-  ):
-    agent = t3a.T3A(
-        env,
-        _get_openai_compatible_wrapper(llm_config),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
-    )
-  elif _AGENT_NAME.value in (
-      'm3a_openai_compatible',
-      'm3a_ui_state_openai_compatible',
-  ):
-    agent = m3a.M3A(
-        env,
-        _get_openai_compatible_wrapper(llm_config),
-        ui_state_provider=compiled_ui_state_provider
-        if use_compiled_ui_state
-        else None,
-    )
-  # SeeAct.
-  elif _AGENT_NAME.value == 'seeact':
-    agent = seeact.SeeAct(env)
+    benchmark_state_lib.save_state(state_path, state)
+    print(f'Initialized benchmark state with {len(state)} records: {state_path}')
 
-  if not agent:
-    raise ValueError(f'Unknown agent: {_AGENT_NAME.value}')
-
-  if (
-      agent.name in ['M3A', 'T3A', 'SeeAct']
-      and family
-      and family.startswith('miniwob')
-      and hasattr(agent, 'set_task_guidelines')
-  ):
-    agent.set_task_guidelines(_MINIWOB_ADDITIONAL_GUIDELINES)
-  agent.name = _AGENT_NAME.value
-
-  return agent
+  return benchmark_state_lib.BenchmarkState(state_path)
 
 
-def _main() -> None:
-  """Runs eval suite and gets rewards back."""
-  env = env_launcher.load_and_setup_env(
-      console_port=_DEVICE_CONSOLE_PORT.value,
-      emulator_setup=_EMULATOR_SETUP.value,
-      adb_path=_ADB_PATH.value,
-      grpc_port=_GRPC_PORT.value,
-  )
+def _resolve_checkpoint_dir(output_config: run_config_lib.OutputConfig) -> str:
+  if output_config.checkpoint_dir:
+    return output_config.checkpoint_dir
+  return checkpointer_lib.create_run_directory(output_config.output_path)
 
-  n_task_combinations = _N_TASK_COMBINATIONS.value
+
+def _build_suite(suite_config: run_config_lib.SuiteConfig) -> suite_utils.Suite:
   task_registry = registry.TaskRegistry()
   suite = suite_utils.create_suite(
-      task_registry.get_registry(family=_SUITE_FAMILY.value),
-      n_task_combinations=n_task_combinations,
-      seed=_TASK_RANDOM_SEED.value,
-      tasks=_TASKS.value,
-      use_identical_params=_FIXED_TASK_SEED.value,
+      task_registry.get_registry(family=suite_config.family),
+      n_task_combinations=suite_config.n_task_combinations,
+      seed=suite_config.task_random_seed,
+      tasks=suite_config.tasks,
+      use_identical_params=suite_config.fixed_task_seed,
   )
-  if _FIRST_K_TASKS.value:
-    suite = suite_utils.Suite(list(suite.items())[: _FIRST_K_TASKS.value])
-  suite.suite_family = _SUITE_FAMILY.value
+  if suite_config.first_k_tasks:
+    suite = suite_utils.Suite(list(suite.items())[: suite_config.first_k_tasks])
+  suite.suite_family = suite_config.family
+  return suite
 
-  agent = _get_agent(env, _SUITE_FAMILY.value)
 
-  if _SUITE_FAMILY.value.startswith('miniwob'):
-    # MiniWoB pages change quickly, don't need to wait for screen to stabilize.
-    agent.transition_pause = _MINIWOB_TRANSITION_PAUSE
-  else:
-    agent.transition_pause = None
+def _main(config: run_config_lib.RunConfig) -> None:
+  """Runs eval suite and gets rewards back."""
+  checkpoint_dir = _resolve_checkpoint_dir(config.output)
+  config.output.checkpoint_dir = checkpoint_dir
+  config.to_json(Path(checkpoint_dir) / 'run_config.json')
 
-  if _CHECKPOINT_DIR.value:
-    checkpoint_dir = _CHECKPOINT_DIR.value
-  else:
-    checkpoint_dir = checkpointer_lib.create_run_directory(_OUTPUT_PATH.value)
-
-  print(
-      f'Starting eval with agent {_AGENT_NAME.value} and writing to'
-      f' {checkpoint_dir}'
+  benchmark_state = _get_benchmark_state(config.output)
+  env = env_launcher.load_and_setup_env(
+      console_port=config.env.console_port,
+      emulator_setup=config.env.perform_emulator_setup,
+      adb_path=config.env.adb_path,
+      grpc_port=config.env.grpc_port,
   )
-  suite_utils.run(
-      suite,
-      agent,
-      checkpointer=checkpointer_lib.IncrementalCheckpointer(checkpoint_dir),
-      demo_mode=False,
-      max_n_steps=_MAX_STEPS.value or None,
-      prompt_data_out=_PROMPT_DATA_OUT.value,
-      runtime_prompt_out=_RUNTIME_PROMPT_OUT.value,
-  )
-  print(
-      f'Finished running agent {_AGENT_NAME.value} on {_SUITE_FAMILY.value}'
-      f' family. Wrote to {checkpoint_dir}.'
-  )
-  env.close()
+  try:
+    suite = _build_suite(config.suite)
+    print('Initializing agent...')
+    agent = agent_factory.create_agent(config.agent, env, config.suite.family)
+
+    print(
+        f'Starting eval with agent {config.agent.name} and writing to'
+        f' {checkpoint_dir}'
+    )
+    suite_utils.run(
+        suite,
+        agent,
+        checkpointer=checkpointer_lib.IncrementalCheckpointer(checkpoint_dir),
+        demo_mode=False,
+        max_n_steps=config.suite.max_steps,
+        prompt_data_out=config.output.prompt_data_out,
+        runtime_prompt_out=config.output.runtime_prompt_out,
+        benchmark_state=benchmark_state,
+        benchmark_state_autosave=config.output.benchmark_state_autosave,
+    )
+    print(
+        f'Finished running agent {config.agent.name} on {config.suite.family}'
+        f' family. Wrote to {checkpoint_dir}.'
+    )
+  finally:
+    env.close()
 
 
-def main(argv: Sequence[str]) -> None:
-  del argv
-  _main()
+def main(argv: Sequence[str] | None = None) -> None:
+  args = build_arg_parser().parse_args(argv)
+  _main(_build_run_config(args))
 
 
 if __name__ == '__main__':
-  app.run(main)
+  main()
