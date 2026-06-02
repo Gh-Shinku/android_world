@@ -9,10 +9,12 @@ import gzip
 import json
 from pathlib import Path
 import pickle
+import re
 from typing import Any
 
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
 
 
 IMAGE_KEYS = {
@@ -24,6 +26,24 @@ IMAGE_KEYS = {
     'before_screenshot_with_som',
     'after_screenshot_with_som',
 }
+
+
+def load_tokenizer(model_or_path: str | None) -> Any:
+  if not model_or_path:
+    return None
+  try:
+    from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
+  except ImportError as exc:
+    raise RuntimeError(
+        'The --tokenizer option requires transformers in the active environment.'
+    ) from exc
+  return AutoTokenizer.from_pretrained(model_or_path)
+
+
+def _token_count(tokenizer: Any, text: str) -> int | None:
+  if tokenizer is None:
+    return None
+  return len(tokenizer(text, add_special_tokens=False)['input_ids'])
 
 
 def _is_image(value: Any) -> bool:
@@ -68,6 +88,155 @@ def _save_image(value: np.ndarray, assets_dir: Path, name: str) -> str:
   return path.name
 
 
+def _parse_action_payload(value: Any) -> dict[str, Any] | None:
+  if isinstance(value, dict):
+    return value
+  if not isinstance(value, str):
+    return None
+  match = re.search(r'Action:\s*(\{.*?\})\s*$', value, flags=re.DOTALL)
+  if not match:
+    match = re.search(r'(\{[^{}]*"action_type"[^{}]*\})', value, flags=re.DOTALL)
+  if not match:
+    return None
+  try:
+    parsed = json.loads(match.group(1))
+  except json.JSONDecodeError:
+    return None
+  return parsed if isinstance(parsed, dict) else None
+
+
+def _selected_action_payload(step: dict[str, Any]) -> dict[str, Any] | None:
+  payload = _parse_action_payload(step.get('action_output_json'))
+  if payload is not None:
+    return payload
+  return _parse_action_payload(step.get('action_output'))
+
+
+def _source_attrs(action: dict[str, Any]) -> dict[str, Any]:
+  source_ref = action.get('source_ref')
+  if isinstance(source_ref, dict):
+    attrs = source_ref.get('attrs')
+    if isinstance(attrs, dict):
+      return attrs
+  return {}
+
+
+def _compact_action(action_id: str, action: dict[str, Any]) -> dict[str, Any]:
+  attrs = _source_attrs(action)
+  return {
+      'id': action_id,
+      'op': action.get('op'),
+      'element_id': action.get('element_id'),
+      'label': action.get('label'),
+      'role': action.get('role'),
+      'bounds': action.get('bounds'),
+      'enabled': action.get('enabled'),
+      'state': action.get('state'),
+      'class_name': attrs.get('class_name'),
+      'resource_name': attrs.get('resource_name'),
+      'package_name': attrs.get('package_name'),
+      'source_id': (
+          action.get('source_ref', {}).get('source_id')
+          if isinstance(action.get('source_ref'), dict)
+          else None
+      ),
+  }
+
+
+def _action_debug_line(action_id: str, action: dict[str, Any]) -> str:
+  compact = _compact_action(action_id, action)
+  for key in ('resource_name', 'class_name', 'package_name', 'source_id'):
+    if compact.get(key) is None and action.get(key) is not None:
+      compact[key] = action.get(key)
+  bounds = compact.get('bounds') or []
+  bounds_text = ','.join(str(value) for value in bounds)
+  pieces = [
+      f'{compact["id"]}',
+      str(compact.get('op') or ''),
+      str(compact.get('role') or ''),
+      f'"{compact.get("label") or ""}"',
+  ]
+  if compact.get('resource_name'):
+    pieces.append(f'resource={compact["resource_name"]}')
+  if compact.get('class_name'):
+    pieces.append(f'class={compact["class_name"]}')
+  if bounds_text:
+    pieces.append(f'bounds=[{bounds_text}]')
+  return ' '.join(piece for piece in pieces if piece)
+
+
+def _add_action_debug(step: dict[str, Any]) -> None:
+  action_map = step.get('before_action_map')
+  if not isinstance(action_map, dict):
+    return
+  step['action_map_summary'] = [
+      _action_debug_line(action_id, action)
+      for action_id, action in sorted(action_map.items())
+      if isinstance(action, dict)
+  ]
+  action_payload = _selected_action_payload(step)
+  if action_payload is not None:
+    step['selected_action_payload'] = action_payload
+  target = action_payload.get('target') if isinstance(action_payload, dict) else None
+  if isinstance(target, str) and isinstance(action_map.get(target), dict):
+    step['selected_target'] = _compact_action(target, action_map[target])
+
+
+def _draw_rect(
+    draw: ImageDraw.ImageDraw,
+    bounds: list[int],
+    *,
+    outline: tuple[int, int, int],
+    width: int,
+    label: str,
+) -> None:
+  if len(bounds) != 4:
+    return
+  x0, y0, x1, y1 = [int(value) for value in bounds]
+  draw.rectangle((x0, y0, x1, y1), outline=outline, width=width)
+  text_y = max(0, y0 - 12)
+  draw.rectangle((x0, text_y, min(x0 + 8 * len(label) + 6, x1 + 120), text_y + 12), fill=outline)
+  draw.text((x0 + 3, text_y), label, fill=(255, 255, 255))
+
+
+def _save_action_overlay(
+    screenshot: np.ndarray,
+    action_map: dict[str, Any],
+    selected_target_id: str | None,
+    resolved_action: dict[str, Any] | None,
+    assets_dir: Path,
+    name: str,
+) -> str:
+  assets_dir.mkdir(parents=True, exist_ok=True)
+  image = Image.fromarray(screenshot).convert('RGB')
+  draw = ImageDraw.Draw(image)
+  for action_id, action in sorted(action_map.items()):
+    if not isinstance(action, dict):
+      continue
+    bounds = action.get('bounds')
+    if isinstance(bounds, list):
+      color = (52, 120, 246)
+      width = 2
+      if action_id == selected_target_id:
+        color = (220, 38, 38)
+        width = 4
+      _draw_rect(draw, bounds, outline=color, width=width, label=action_id)
+  if isinstance(resolved_action, dict):
+    bounds = resolved_action.get('target_bounds')
+    if isinstance(bounds, list):
+      _draw_rect(draw, bounds, outline=(22, 163, 74), width=2, label='resolved')
+    x = resolved_action.get('x')
+    y = resolved_action.get('y')
+    if x is not None and y is not None:
+      x = int(x)
+      y = int(y)
+      draw.line((x - 8, y, x + 8, y), fill=(22, 163, 74), width=2)
+      draw.line((x, y - 8, x, y + 8), fill=(22, 163, 74), width=2)
+  path = assets_dir / f'{name}.png'
+  image.save(path)
+  return path.name
+
+
 def _episode_step_count(episode_data: dict[str, Any]) -> int:
   for values in episode_data.values():
     if isinstance(values, list):
@@ -78,6 +247,36 @@ def _episode_step_count(episode_data: dict[str, Any]) -> int:
 def _step_value(values: Any, step_idx: int) -> Any:
   if isinstance(values, list) and step_idx < len(values):
     return values[step_idx]
+  return None
+
+
+def _model_name_from_raw_response(value: Any) -> str | None:
+  if value is None:
+    return None
+  model = getattr(value, 'model', None)
+  if model:
+    return str(model)
+  if isinstance(value, dict) and value.get('model'):
+    return str(value['model'])
+  if hasattr(value, 'model_dump') and callable(value.model_dump):
+    try:
+      dumped = value.model_dump()
+    except Exception:  # pylint: disable=broad-exception-caught
+      dumped = None
+    if isinstance(dumped, dict) and dumped.get('model'):
+      return str(dumped['model'])
+  return None
+
+
+def _episode_backend_model(episode_data: dict[str, Any]) -> str | None:
+  for key in ('action_raw_response', 'summary_raw_response'):
+    values = episode_data.get(key)
+    if not isinstance(values, list):
+      continue
+    for value in values:
+      model = _model_name_from_raw_response(value)
+      if model:
+        return model
   return None
 
 
@@ -96,13 +295,16 @@ def _convert_episode(
   if not isinstance(episode_data, dict):
     converted['episode_data'] = _jsonable(episode_data)
     return converted
+  converted['backend_model_name'] = _episode_backend_model(episode_data)
 
   steps = []
   step_count = _episode_step_count(episode_data)
   for step_idx in range(step_count):
     step = {}
+    raw_step = {}
     for key, values in episode_data.items():
       value = _step_value(values, step_idx)
+      raw_step[key] = value
       if key in IMAGE_KEYS and _is_image(value):
         filename = _save_image(
             value,
@@ -112,6 +314,28 @@ def _convert_episode(
         step[key] = f'{assets_dir.name}/{filename}'
       else:
         step[key] = _jsonable(value)
+    _add_action_debug(step)
+    before_screenshot = raw_step.get('before_screenshot')
+    action_map = step.get('before_action_map')
+    selected = step.get('selected_action_payload')
+    selected_target_id = (
+        selected.get('target') if isinstance(selected, dict) else None
+    )
+    resolved_action = step.get('resolved_action')
+    if (
+        _is_image(before_screenshot)
+        and isinstance(action_map, dict)
+        and action_map
+    ):
+      filename = _save_action_overlay(
+          before_screenshot,
+          action_map,
+          selected_target_id if isinstance(selected_target_id, str) else None,
+          resolved_action if isinstance(resolved_action, dict) else None,
+          assets_dir,
+          f'episode_{episode_idx:03d}_step_{step_idx:03d}_before_actions_overlay',
+      )
+      step['before_actions_overlay'] = f'{assets_dir.name}/{filename}'
     steps.append(step)
 
   converted['episode_data'] = {
@@ -132,20 +356,61 @@ def _short(value: Any, max_len: int = 500) -> str:
   return value[:max_len] + '...'
 
 
+def _full_text(value: Any) -> str:
+  if value is None:
+    return ''
+  if isinstance(value, str):
+    return value
+  return json.dumps(_jsonable(value), ensure_ascii=False, indent=2)
+
+
+def _result_label(value: Any) -> str:
+  try:
+    return 'success' if float(value) > 0.5 else 'fail'
+  except (TypeError, ValueError):
+    return 'unknown'
+
+
+def _image_link(
+    lines: list[str],
+    label: str,
+    image_path: str | None,
+    episode_idx: int,
+    step_idx: int,
+) -> None:
+  lines.extend([f'*{label}*:', ''])
+  if image_path:
+    lines.extend([
+        f'![episode {episode_idx} step {step_idx} {label}]({image_path})',
+        '',
+    ])
+  else:
+    lines.extend(['not available', ''])
+
+
+def _first_image_path(step: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+  for key in keys:
+    value = step.get(key)
+    if isinstance(value, str) and value:
+      return value
+  return None
+
+
 def _write_markdown(
     episodes: list[dict[str, Any]],
     output_path: Path,
+    tokenizer: Any = None,
+    tokenizer_name: str | None = None,
 ) -> None:
-  lines = [f'# {output_path.stem}', '']
+  lines = [f'# {output_path.stem} Summary', '']
   for episode_idx, episode in enumerate(episodes):
+    agent = _short(episode.get('agent_name')) or 'unknown_agent'
+    model = _short(episode.get('backend_model_name')) or 'unknown_model'
     lines.extend([
-        f'## Episode {episode_idx}',
-        '',
         f'- Goal: {_short(episode.get("goal"))}',
         f'- Task: {_short(episode.get("task_template"))}',
-        f'- Agent: {_short(episode.get("agent_name"))}',
-        f'- Success: {_short(episode.get("is_successful"))}',
-        f'- Episode length: {_short(episode.get("episode_length"))}',
+        f'- Agent: {agent} | {model}',
+        f'- Result: {_result_label(episode.get("is_successful"))}',
         f'- Runtime: {_short(episode.get("run_time"))}',
         '',
     ])
@@ -153,66 +418,107 @@ def _write_markdown(
     episode_data = episode.get('episode_data') or {}
     steps = episode_data.get('steps', []) if isinstance(episode_data, dict) else []
     for step_idx, step in enumerate(steps):
-      lines.extend([f'### Step {step_idx}', ''])
-      for image_key in sorted(IMAGE_KEYS):
-        image_path = step.get(image_key)
-        if image_path:
-          lines.extend([
-              f'**{image_key}**',
-              '',
-              f'![episode {episode_idx} step {step_idx} {image_key}]({image_path})',
-              '',
-          ])
-      for key in (
-          'action',
-          'action_output_json',
-          'action_output',
-          'action_reason',
-          'summary',
-          'action_description',
-          'step_number',
-      ):
-        if key in step and step[key] not in (None, ''):
-          lines.extend([f'- {key}:', '', '```text', _short(step[key]), '```', ''])
+      lines.extend([f'## Step {step_idx}', ''])
 
-      ui_keys = [
-          key for key in step
-          if key.endswith('ui_elements')
-          or key.endswith('element_list')
-          or key == 'ui_elements'
-          or key == 'elements'
-      ]
-      for key in ui_keys:
-        value = step.get(key)
-        if isinstance(value, list):
-          lines.append(f'- {key}: {len(value)} items')
-      lines.append('')
+      lines.extend(['### action_map', '', '```text'])
+      action_summary = step.get('action_map_summary')
+      if isinstance(action_summary, list) and action_summary:
+        lines.extend(str(line) for line in action_summary)
+      else:
+        lines.append('not available')
+      lines.extend(['```', ''])
+      overlay_path = step.get('before_actions_overlay')
+      if isinstance(overlay_path, str) and overlay_path:
+        _image_link(lines, 'overlay', overlay_path, episode_idx, step_idx)
+
+      prompt = _full_text(step.get('action_prompt'))
+      lines.extend(['### prompt', ''])
+      if tokenizer is not None and prompt:
+        tokens = _token_count(tokenizer, prompt)
+        lines.extend([
+            f'- tokens: {tokens}',
+            f'- tokenizer: {tokenizer_name}',
+            '',
+        ])
+      lines.append('```text')
+      lines.append(prompt if prompt else 'not available')
+      lines.extend(['```', ''])
+
+      lines.extend(['### response', '', '```text'])
+      response = _full_text(step.get('action_output'))
+      lines.append(response if response else 'not available')
+      lines.extend(['```', ''])
+
+      if step.get('selected_target'):
+        lines.extend(['### selected target', '', '```text'])
+        lines.append(
+            _action_debug_line(
+                str(step['selected_target'].get('id')),
+                step['selected_target'],
+            )
+        )
+        lines.extend(['```', ''])
+      if step.get('resolved_action'):
+        lines.extend(['### resolved action', '', '```json'])
+        lines.append(json.dumps(step['resolved_action'], ensure_ascii=False, indent=2))
+        lines.extend(['```', ''])
+
+      before_raw = _first_image_path(
+          step,
+          ('before_screenshot', 'raw_screenshot', 'before_screenshot_with_som'),
+      )
+      lines.extend(['### before screenshot', ''])
+      _image_link(
+          lines,
+          'raw',
+          before_raw,
+          episode_idx,
+          step_idx,
+      )
+
+      after_raw = _first_image_path(
+          step,
+          ('after_screenshot', 'after_screenshot_with_som'),
+      )
+      lines.extend(['### after screenshot', ''])
+      _image_link(lines, 'raw', after_raw, episode_idx, step_idx)
 
   output_path.write_text('\n'.join(lines), encoding='utf-8')
 
 
-def export_file(path: Path) -> None:
+def export_file(
+    path: Path,
+    output_dir: Path | None = None,
+    tokenizer: Any = None,
+    tokenizer_name: str | None = None,
+) -> None:
   with gzip.open(path, 'rb') as f:
     episodes = pickle.load(f)
   if not isinstance(episodes, list):
     episodes = [episodes]
 
-  assets_dir = path.with_suffix('').with_suffix('').with_name(
-      path.name.removesuffix('.pkl.gz') + '_assets'
-  )
+  output_base_dir = output_dir or path.parent
+  output_base_dir.mkdir(parents=True, exist_ok=True)
+  stem = path.name.removesuffix('.pkl.gz')
+  assets_dir = output_base_dir / f'{stem}_assets'
   converted = [
       _convert_episode(episode, i, assets_dir)
       for i, episode in enumerate(episodes)
   ]
 
-  json_path = path.with_name(path.name.removesuffix('.pkl.gz') + '.readable.json')
+  json_path = output_base_dir / f'{stem}.readable.json'
   json_path.write_text(
       json.dumps(converted, ensure_ascii=False, indent=2),
       encoding='utf-8',
   )
 
-  md_path = path.with_name(path.name.removesuffix('.pkl.gz') + '.summary.md')
-  _write_markdown(converted, md_path)
+  md_path = output_base_dir / f'{stem}.summary.md'
+  _write_markdown(
+      converted,
+      md_path,
+      tokenizer=tokenizer,
+      tokenizer_name=tokenizer_name,
+  )
   print(f'wrote {json_path}')
   print(f'wrote {md_path}')
   if assets_dir.exists():
@@ -232,10 +538,27 @@ def main() -> None:
       type=Path,
       help='Path to a .pkl.gz checkpoint file or a directory containing them.',
   )
+  parser.add_argument(
+      '--output-dir',
+      type=Path,
+      default=None,
+      help='Directory to write readable exports. Defaults next to input.',
+  )
+  parser.add_argument(
+      '--tokenizer',
+      default=None,
+      help='Optional Hugging Face tokenizer model/path for action prompt tokens.',
+  )
   args = parser.parse_args()
+  tokenizer = load_tokenizer(args.tokenizer)
 
   for input_path in _iter_inputs(args.path):
-    export_file(input_path)
+    export_file(
+        input_path,
+        args.output_dir,
+        tokenizer=tokenizer,
+        tokenizer_name=args.tokenizer,
+    )
 
 
 if __name__ == '__main__':
