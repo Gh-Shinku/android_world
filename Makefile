@@ -4,13 +4,14 @@ GRPC_PORT ?= 8554
 SCREENSHOT_DIR ?= data/screenshots
 
 # ---- Benchmark ----
-RUN_CONFIG ?= configs/runs/default.json
+RUN_CONFIG ?= configs/runs/compiled.json
+LLM_CONFIG ?= configs/bailian.example.json
 ARGS ?=
 
 # ---- Post-processing ----
 RUN_DIR ?= runs/latest
-CHECKPOINT ?=
-TOKENIZER ?=
+CHECKPOINT ?= runs/run_20260603T152010375315/BrowserDraw_0.pkl.gz
+TOKENIZER ?= /mnt/sda/zyt/models/Llama-3.2-3B-Instruct
 BENCHMARK_STATE ?= runs/benchmark_state.txt
 
 .PHONY: help \
@@ -83,13 +84,16 @@ install-package:
 ## ---- Benchmark ----
 
 run:
-	$(ANDROID_WORLD_PYTHON) run.py --config $(RUN_CONFIG) $(ARGS)
+	$(ANDROID_WORLD_PYTHON) run.py --config $(RUN_CONFIG) \
+		--llm_config_path=$(LLM_CONFIG) $(ARGS)
 
 run-debug:
-	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/debug.json $(ARGS)
+	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/debug.json \
+		--llm_config_path=$(LLM_CONFIG) $(ARGS)
 
 run-compiled:
-	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/compiled.json $(ARGS)
+	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/compiled.json \
+		--llm_config_path=$(LLM_CONFIG) $(ARGS)
 
 ## ---- Post-processing ----
 
@@ -116,4 +120,5 @@ state-init:
 
 state-rerun:
 	$(ANDROID_WORLD_PYTHON) run.py --config $(RUN_CONFIG) \
+		--llm_config_path=$(LLM_CONFIG) \
 		--benchmark_state=$(BENCHMARK_STATE) $(ARGS)
