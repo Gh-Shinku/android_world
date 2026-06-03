@@ -24,6 +24,6 @@ poetry.lock
 # PyCharm
 .idea
 
-runs/
-logs/
-data/
+/runs/
+/logs/
+/data/

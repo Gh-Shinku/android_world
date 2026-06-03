@@ -1,0 +1,45 @@
+{
+  "env": {
+    "adb_path": "",
+    "perform_emulator_setup": false,
+    "console_port": 5554,
+    "grpc_port": 8554
+  },
+  "suite": {
+    "family": "android_world",
+    "task_random_seed": 30,
+    "tasks": null,
+    "first_k_tasks": 0,
+    "n_task_combinations": 1,
+    "max_steps": 20,
+    "fixed_task_seed": false
+  },
+  "agent": {
+    "name": "t3a_openai_compatible",
+    "llm": {
+      "model_name": "qwen3.6-flash",
+      "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "api_key": null,
+      "max_retry": 3,
+      "max_tokens": 1024,
+      "temperature": 0.0,
+      "extra_body": {
+        "enable_thinking": true
+      },
+      "extra_request_kwargs": {}
+    },
+    "ui_state_mode": "compiled",
+    "ui_state_include_system_ui": false,
+    "ui_state_include_invisible": false
+  },
+  "output": {
+    "checkpoint_dir": "",
+    "output_path": "./runs",
+    "prompt_data_out": "runs/prompts.jsonl",
+    "runtime_prompt_out": "runs/runtime_prompts.jsonl",
+    "benchmark_state": "",
+    "benchmark_state_init_from": "",
+    "benchmark_state_autosave": true
+  }
+}
