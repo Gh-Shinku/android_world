@@ -396,6 +396,52 @@ def _first_image_path(step: dict[str, Any], keys: tuple[str, ...]) -> str | None
   return None
 
 
+def _add_prompt_block(
+    lines: list[str],
+    title: str,
+    prompt: str,
+    *,
+    tokenizer: Any = None,
+    tokenizer_name: str | None = None,
+) -> None:
+  lines.extend([f'### {title}', ''])
+  if tokenizer is not None and prompt:
+    tokens = _token_count(tokenizer, prompt)
+    lines.extend([
+        f'- tokens: {tokens}',
+        f'- tokenizer: {tokenizer_name}',
+        '',
+    ])
+  lines.append('```text')
+  lines.append(prompt if prompt else 'not available')
+  lines.extend(['```', ''])
+
+
+def _prompt_compare(step: dict[str, Any]) -> dict[str, Any]:
+  prompt_compare = step.get('prompt_compare')
+  return prompt_compare if isinstance(prompt_compare, dict) else {}
+
+
+def _actual_prompt_mode(step: dict[str, Any]) -> str:
+  prompt_compare = _prompt_compare(step)
+  mode = prompt_compare.get('actual_mode') or step.get('ui_state_mode')
+  return str(mode) if mode else ''
+
+
+def _alternative_prompt(step: dict[str, Any], key: str) -> str:
+  prompt_compare = _prompt_compare(step)
+  alternatives = prompt_compare.get('alternative_prompts')
+  if isinstance(alternatives, dict) and alternatives.get(key):
+    return _full_text(alternatives[key])
+
+  # Compatibility for older readable JSONs that used flattened fields.
+  legacy_key = {
+      'raw': 'raw_action_prompt',
+      'compiled': 'compiled_action_prompt',
+  }.get(key)
+  return _full_text(step.get(legacy_key)) if legacy_key else ''
+
+
 def _write_markdown(
     episodes: list[dict[str, Any]],
     output_path: Path,
@@ -432,17 +478,36 @@ def _write_markdown(
         _image_link(lines, 'overlay', overlay_path, episode_idx, step_idx)
 
       prompt = _full_text(step.get('action_prompt'))
-      lines.extend(['### prompt', ''])
-      if tokenizer is not None and prompt:
-        tokens = _token_count(tokenizer, prompt)
-        lines.extend([
-            f'- tokens: {tokens}',
-            f'- tokenizer: {tokenizer_name}',
-            '',
-        ])
-      lines.append('```text')
-      lines.append(prompt if prompt else 'not available')
-      lines.extend(['```', ''])
+      actual_mode = _actual_prompt_mode(step)
+      raw_prompt = (
+          prompt if actual_mode == 'legacy' else _alternative_prompt(step, 'raw')
+      )
+      compiled_prompt = (
+          prompt
+          if actual_mode == 'compiled'
+          else _alternative_prompt(step, 'compiled')
+      )
+      _add_prompt_block(
+          lines,
+          'prompt sent to model',
+          prompt,
+          tokenizer=tokenizer,
+          tokenizer_name=tokenizer_name,
+      )
+      _add_prompt_block(
+          lines,
+          'raw prompt',
+          raw_prompt,
+          tokenizer=tokenizer,
+          tokenizer_name=tokenizer_name,
+      )
+      _add_prompt_block(
+          lines,
+          'compiled prompt',
+          compiled_prompt,
+          tokenizer=tokenizer,
+          tokenizer_name=tokenizer_name,
+      )
 
       lines.extend(['### response', '', '```text'])
       response = _full_text(step.get('action_output'))

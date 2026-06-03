@@ -9,14 +9,15 @@ LLM_CONFIG ?= configs/bailian.example.json
 ARGS ?=
 
 # ---- Post-processing ----
-RUN_DIR ?= runs/latest
+RUN_DIR ?= runs/run_20260603T191233865199
 TOKENIZER ?= /mnt/sda/zyt/models/Llama-3.2-3B-Instruct
 BENCHMARK_STATE ?= runs/benchmark_state.txt
+RETROFIT_OUTPUT_DIR ?= runs/tmp
 
 .PHONY: help \
 	emulator check-emulator screenshot install-apps install-package \
 	run run-debug run-compiled \
-	summarize export export-fail state-init state-rerun
+	summarize export export-fail retrofit-readable state-init state-rerun
 
 help:
 	@echo "Infrastructure:"
@@ -38,6 +39,7 @@ help:
 	@echo "  make summarize         Summarize partial run from RUN_DIR"
 	@echo "  make export            Export all checkpoints in RUN_DIR to readable exports"
 	@echo "  make export-fail       Export readable files for records marked fail"
+	@echo "  make retrofit-readable Add raw/compiled prompts to readable JSON files"
 	@echo "  make state-init        Initialize benchmark state from RUN_DIR"
 	@echo "  make state-rerun       Re-run only instances marked fail"
 	@echo ""
@@ -110,6 +112,11 @@ export-fail:
 		--checkpoint-dir $(RUN_DIR) \
 		--missing-ok \
 		$(and $(TOKENIZER),--tokenizer $(TOKENIZER))
+
+retrofit-readable:
+	$(ANDROID_WORLD_PYTHON) scripts/retrofit_readable_raw_compiled_prompts.py \
+		$(RUN_DIR) \
+		--output-dir $(RETROFIT_OUTPUT_DIR)
 
 state-init:
 	$(ANDROID_WORLD_PYTHON) scripts/init_benchmark_state.py \
