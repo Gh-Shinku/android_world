@@ -314,9 +314,9 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
       extra_body: dict[str, Any] | None = None,
       extra_request_kwargs: dict[str, Any] | None = None,
   ):
-    if api_key is None and api_key_env not in os.environ:
-      raise RuntimeError(f'{api_key_env} API key not set.')
-    self.openai_api_key = api_key or os.environ[api_key_env]
+    if api_key is None:
+      api_key = os.environ.get(api_key_env)
+    self.openai_api_key = api_key or ""
     if max_retry <= 0:
       max_retry = 3
       print('Max_retry must be positive. Reset it to 3')
