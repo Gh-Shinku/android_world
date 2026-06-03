@@ -17,6 +17,7 @@ from unittest import mock
 from absl.testing import absltest
 from android_world.agents import infer
 from android_world.agents import t3a
+from android_world.ui_state import provider as ui_state_provider
 from android_world.utils import test_utils
 
 
@@ -37,6 +38,17 @@ class MockLlmWrapper(infer.LlmWrapper):
       return self.mock_responses[index][0], None, self.mock_responses[index][1]
     else:
       return infer.ERROR_CALLING_LLM, None, None
+
+
+class FakeCompiledUiStateProvider:
+
+  def build(self, state, *, screen_size, app_name='', activity=''):
+    del state, screen_size, app_name, activity
+    return ui_state_provider.UiStateView(
+        mode='compiled',
+        prompt_text='Compiled UI State\n  Actions:\n    A0 click button "Done"',
+        action_map={},
+    )
 
 
 class T3AInteractionTest(absltest.TestCase):
@@ -78,6 +90,80 @@ class T3AInteractionTest(absltest.TestCase):
     self.assertEqual(records[0]['step_number'], 0)
     self.assertEqual(records[0]['goal'], 'do something')
     self.assertEqual(records[0]['prompt'], step_data.data['action_prompt'])
+
+  def test_legacy_mode_records_raw_prompt(self):
+    env = test_utils.FakeAsyncEnv()
+    mock_llm = MockLlmWrapper([(
+        (
+            "Reason: completed.\nAction: {'action_type': 'status',"
+            " 'goal_status': 'complete'}"
+        ),
+        "fake_response",
+    )])
+    agent = t3a.T3A(env, mock_llm)
+
+    step_data = agent.step("do something")
+
+    prompt_compare = step_data.data['prompt_compare']
+    self.assertEqual(prompt_compare['actual_mode'], 'legacy')
+    self.assertEqual(prompt_compare['actual_prompt_field'], 'action_prompt')
+    self.assertEmpty(prompt_compare['alternative_prompts'])
+
+  def test_compiled_mode_records_raw_and_compiled_prompts(self):
+    env = test_utils.FakeAsyncEnv()
+    mock_llm = MockLlmWrapper([(
+        (
+            "Reason: completed.\nAction: {'action_type': 'status',"
+            " 'goal_status': 'complete'}"
+        ),
+        "fake_response",
+    )])
+    agent = t3a.T3A(
+        env, mock_llm, ui_state_provider=FakeCompiledUiStateProvider()
+    )
+    records = []
+    agent.set_runtime_prompt_logger(lambda **kwargs: records.append(kwargs))
+
+    step_data = agent.step("do something")
+
+    prompt_compare = step_data.data['prompt_compare']
+    self.assertEqual(prompt_compare['actual_mode'], 'compiled')
+    self.assertEqual(prompt_compare['actual_prompt_field'], 'action_prompt')
+    raw_prompt = prompt_compare['alternative_prompts']['raw']
+    self.assertNotEqual(
+        raw_prompt, step_data.data['action_prompt']
+    )
+    self.assertIn('Here is a list of descriptions for some UI elements',
+                  raw_prompt)
+    self.assertIn('Here is the compiled UI state',
+                  step_data.data['action_prompt'])
+    self.assertLen(records, 1)
+    self.assertEqual(
+        records[0]['prompt_compare'], step_data.data['prompt_compare']
+    )
+
+  def test_compiled_mode_uses_compiled_ui_state_for_summary_prompt(self):
+    env = test_utils.FakeAsyncEnv()
+    mock_llm = MockLlmWrapper([
+        (
+            (
+                "Reason: answer.\nAction: {'action_type': 'answer',"
+                " 'text': 'mock_response'}"
+            ),
+            "fake_response_1",
+        ),
+        ("fake_summary", "fake_response_2"),
+    ])
+    agent = t3a.T3A(
+        env, mock_llm, ui_state_provider=FakeCompiledUiStateProvider()
+    )
+
+    step_data = agent.step("do something")
+
+    self.assertFalse(step_data.done)
+    self.assertEqual(step_data.data['summary_ui_state_mode'], 'compiled')
+    self.assertIn('Compiled UI State', step_data.data['summary_prompt'])
+    self.assertIn('Here is the compiled UI state', step_data.data['action_prompt'])
 
   def test_history_recording(self):
     env = test_utils.FakeAsyncEnv()

@@ -478,8 +478,10 @@ class M3A(base_agent.EnvironmentInteractingAgent):
         'summary_prompt': None,
         'summary': None,
         'summary_raw_response': None,
+        'summary_ui_state_mode': None,
         'ui_state_mode': None,
         'before_ui_state_text': None,
+        'prompt_compare': None,
         'before_compiled_ui_state': None,
         'before_action_map': None,
         'resolved_action': None,
@@ -532,21 +534,31 @@ class M3A(base_agent.EnvironmentInteractingAgent):
         for i, step_info in enumerate(self.history)
     ]
     with progress.span('build_action_prompt', step=step_number):
+      raw_action_prompt = _action_selection_prompt(
+          goal,
+          history,
+          before_ui_elements_list,
+          self.additional_guidelines,
+      )
       if ui_state_view.mode == 'compiled':
-        action_prompt = _compiled_action_selection_prompt(
+        compiled_action_prompt = _compiled_action_selection_prompt(
             goal,
             history,
             ui_state_view.prompt_text,
             self.additional_guidelines,
         )
+        action_prompt = compiled_action_prompt
       else:
-        action_prompt = _action_selection_prompt(
-            goal,
-            history,
-            before_ui_elements_list,
-            self.additional_guidelines,
-        )
+        compiled_action_prompt = None
+        action_prompt = raw_action_prompt
     step_data['action_prompt'] = action_prompt
+    step_data['prompt_compare'] = {
+        'actual_mode': ui_state_view.mode,
+        'actual_prompt_field': 'action_prompt',
+        'alternative_prompts': {'raw': raw_action_prompt}
+        if ui_state_view.mode == 'compiled'
+        else {},
+    }
     with progress.span('llm_action', step=step_number):
       action_output, is_safe, raw_response = self.llm.predict_mm(
           action_prompt,
@@ -719,12 +731,25 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['after_screenshot_with_som'] = after_screenshot.copy()
 
     with progress.span('build_summary_prompt', step=step_number):
+      summary_before_elements = before_ui_elements_list
+      summary_after_elements = after_ui_elements_list
+      if ui_state_view.mode == 'compiled':
+        after_activity = self.env.foreground_activity_name
+        after_ui_state_view = self.ui_state_provider.build(
+            state,
+            screen_size=logical_screen_size,
+            app_name=after_activity.split('/')[0] if after_activity else '',
+            activity=after_activity,
+        )
+        summary_before_elements = ui_state_view.prompt_text
+        summary_after_elements = after_ui_state_view.prompt_text
+      step_data['summary_ui_state_mode'] = ui_state_view.mode
       summary_prompt = _summarize_prompt(
           action,
           reason,
           goal,
-          before_ui_elements_list,
-          after_ui_elements_list,
+          summary_before_elements,
+          summary_after_elements,
       )
     with progress.span('llm_summary', step=step_number):
       summary, is_safe, raw_response = self.llm.predict_mm(

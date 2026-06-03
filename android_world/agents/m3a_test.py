@@ -18,6 +18,7 @@ from absl.testing import absltest
 from android_world.agents import infer
 from android_world.agents import m3a
 from android_world.env import adb_utils
+from android_world.ui_state import provider as ui_state_provider
 from android_world.utils import test_utils
 import numpy as np
 
@@ -38,6 +39,17 @@ class MockMultimodalLlmWrapper(infer.MultimodalLlmWrapper):
       return self.mock_responses[index][0], None, self.mock_responses[index][1]
     else:
       return infer.ERROR_CALLING_LLM, None, None
+
+
+class FakeCompiledUiStateProvider:
+
+  def build(self, state, *, screen_size, app_name='', activity=''):
+    del state, screen_size, app_name, activity
+    return ui_state_provider.UiStateView(
+        mode='compiled',
+        prompt_text='Compiled UI State\n  Actions:\n    A0 click button "Done"',
+        action_map={},
+    )
 
 
 class M3AInteractionTest(absltest.TestCase):
@@ -73,6 +85,77 @@ class M3AInteractionTest(absltest.TestCase):
     goal = 'do something'
     step_data = agent.step(goal)
     self.assertTrue(step_data.done)
+
+  def test_legacy_mode_records_raw_prompt(self):
+    env = test_utils.FakeAsyncEnv()
+    llm = MockMultimodalLlmWrapper([(
+        (
+            "Reason: completed.\nAction: {'action_type': 'status',"
+            " 'goal_status': 'complete'}"
+        ),
+        'test raw response',
+    )])
+    agent = m3a.M3A(env, llm)
+
+    step_data = agent.step('do something')
+
+    prompt_compare = step_data.data['prompt_compare']
+    self.assertEqual(prompt_compare['actual_mode'], 'legacy')
+    self.assertEqual(prompt_compare['actual_prompt_field'], 'action_prompt')
+    self.assertEmpty(prompt_compare['alternative_prompts'])
+
+  def test_compiled_mode_records_raw_and_compiled_prompts(self):
+    env = test_utils.FakeAsyncEnv()
+    llm = MockMultimodalLlmWrapper([(
+        (
+            "Reason: completed.\nAction: {'action_type': 'status',"
+            " 'goal_status': 'complete'}"
+        ),
+        'test raw response',
+    )])
+    agent = m3a.M3A(
+        env, llm, ui_state_provider=FakeCompiledUiStateProvider()
+    )
+
+    step_data = agent.step('do something')
+
+    prompt_compare = step_data.data['prompt_compare']
+    self.assertEqual(prompt_compare['actual_mode'], 'compiled')
+    self.assertEqual(prompt_compare['actual_prompt_field'], 'action_prompt')
+    raw_prompt = prompt_compare['alternative_prompts']['raw']
+    self.assertNotEqual(
+        raw_prompt, step_data.data['action_prompt']
+    )
+    self.assertIn(
+        'Here is a list of detailed information',
+        raw_prompt,
+    )
+    self.assertIn('Here is the compiled UI state',
+                  step_data.data['action_prompt'])
+
+  def test_compiled_mode_uses_compiled_ui_state_for_summary_prompt(self):
+    env = test_utils.FakeAsyncEnv()
+    llm = MockMultimodalLlmWrapper([
+        (
+            (
+                "Reason: answer question.\nAction: {'action_type': 'answer',"
+                " 'text': 'fake answer.'}"
+            ),
+            'test raw response',
+        ),
+        ('fake summary', 'test raw response'),
+    ])
+    agent = m3a.M3A(
+        env, llm, ui_state_provider=FakeCompiledUiStateProvider()
+    )
+
+    step_data = agent.step('do something')
+
+    self.assertFalse(step_data.done)
+    self.assertEqual(step_data.data['summary_ui_state_mode'], 'compiled')
+    self.assertIn('Compiled UI State', step_data.data['summary_prompt'])
+    self.assertIn('Here is the compiled UI state',
+                  step_data.data['action_prompt'])
 
   def test_step_method_with_invalid_action_output(self):
     env = test_utils.FakeAsyncEnv()

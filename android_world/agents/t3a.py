@@ -415,8 +415,10 @@ class T3A(base_agent.EnvironmentInteractingAgent):
         'summary_prompt': None,
         'summary': None,
         'summary_raw_response': None,
+        'summary_ui_state_mode': None,
         'ui_state_mode': None,
         'before_ui_state_text': None,
+        'prompt_compare': None,
         'before_compiled_ui_state': None,
         'before_action_map': None,
         'resolved_action': None,
@@ -456,25 +458,36 @@ class T3A(base_agent.EnvironmentInteractingAgent):
         for i, step_info in enumerate(self.history)
     ]
     with progress.span('build_action_prompt', step=step_number):
+      raw_action_prompt = _action_selection_prompt(
+          goal,
+          history,
+          before_element_list,
+          self.additional_guidelines,
+      )
       if ui_state_view.mode == 'compiled':
-        action_prompt = _compiled_action_selection_prompt(
+        compiled_action_prompt = _compiled_action_selection_prompt(
             goal,
             history,
             ui_state_view.prompt_text,
             self.additional_guidelines,
         )
+        action_prompt = compiled_action_prompt
       else:
-        action_prompt = _action_selection_prompt(
-            goal,
-            history,
-            before_element_list,
-            self.additional_guidelines,
-        )
+        compiled_action_prompt = None
+        action_prompt = raw_action_prompt
     step_data['action_prompt'] = action_prompt
+    step_data['prompt_compare'] = {
+        'actual_mode': ui_state_view.mode,
+        'actual_prompt_field': 'action_prompt',
+        'alternative_prompts': {'raw': raw_action_prompt}
+        if ui_state_view.mode == 'compiled'
+        else {},
+    }
     if self.runtime_prompt_logger is not None:
       self.runtime_prompt_logger(
           goal=goal,
           prompt=action_prompt,
+          prompt_compare=step_data['prompt_compare'],
           prompt_kind='t3a_action_selection',
           step_number=len(self.history),
           ui_state_mode=ui_state_view.mode,
@@ -626,12 +639,25 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['after_element_list'] = ui_elements
 
     with progress.span('build_summary_prompt', step=step_number):
+      summary_before_elements = before_element_list
+      summary_after_elements = after_element_list
+      if ui_state_view.mode == 'compiled':
+        after_activity = self.env.foreground_activity_name
+        after_ui_state_view = self.ui_state_provider.build(
+            state,
+            screen_size=self.env.logical_screen_size,
+            app_name=after_activity.split('/')[0] if after_activity else '',
+            activity=after_activity,
+        )
+        summary_before_elements = ui_state_view.prompt_text
+        summary_after_elements = after_ui_state_view.prompt_text
+      step_data['summary_ui_state_mode'] = ui_state_view.mode
       summary_prompt = _summarize_prompt(
           goal,
           action,
           reason,
-          before_element_list,
-          after_element_list,
+          summary_before_elements,
+          summary_after_elements,
       )
 
     with progress.span('llm_summary', step=step_number):
