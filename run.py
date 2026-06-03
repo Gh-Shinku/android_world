@@ -358,12 +358,14 @@ def _main(config: run_config_lib.RunConfig) -> None:
   config.to_json(Path(checkpoint_dir) / 'run_config.json')
 
   benchmark_state = _get_benchmark_state(config.output)
-  env = env_launcher.load_and_setup_env(
+  env_kwargs: dict[str, object] = dict(
       console_port=config.env.console_port,
       emulator_setup=config.env.perform_emulator_setup,
-      adb_path=config.env.adb_path,
       grpc_port=config.env.grpc_port,
   )
+  if config.env.adb_path:
+      env_kwargs['adb_path'] = config.env.adb_path
+  env = env_launcher.load_and_setup_env(**env_kwargs)
   try:
     suite = _build_suite(config.suite)
     print('Initializing agent...')
