@@ -316,7 +316,7 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
   ):
     if api_key is None:
       api_key = os.environ.get(api_key_env)
-    self.openai_api_key = api_key or ""
+    self.openai_api_key = api_key or "EMPTY"
     if max_retry <= 0:
       max_retry = 3
       print('Max_retry must be positive. Reset it to 3')
