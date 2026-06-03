@@ -10,7 +10,6 @@ ARGS ?=
 
 # ---- Post-processing ----
 RUN_DIR ?= runs/latest
-CHECKPOINT ?= runs/run_20260603T152010375315/BrowserDraw_0.pkl.gz
 TOKENIZER ?= /mnt/sda/zyt/models/Llama-3.2-3B-Instruct
 BENCHMARK_STATE ?= runs/benchmark_state.txt
 
@@ -37,7 +36,7 @@ help:
 	@echo ""
 	@echo "Post-processing:"
 	@echo "  make summarize         Summarize partial run from RUN_DIR"
-	@echo "  make export            Export CHECKPOINT to readable JSON/Markdown"
+	@echo "  make export            Export all checkpoints in RUN_DIR to readable exports"
 	@echo "  make export-fail       Export readable files for records marked fail"
 	@echo "  make state-init        Initialize benchmark state from RUN_DIR"
 	@echo "  make state-rerun       Re-run only instances marked fail"
@@ -102,7 +101,7 @@ summarize:
 		--run-dir $(RUN_DIR)
 
 export:
-	$(ANDROID_WORLD_PYTHON) scripts/export_episode_readable.py $(CHECKPOINT) \
+	$(ANDROID_WORLD_PYTHON) scripts/export_episode_readable.py $(RUN_DIR) \
 		$(and $(TOKENIZER),--tokenizer $(TOKENIZER))
 
 export-fail:
