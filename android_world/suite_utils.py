@@ -31,6 +31,7 @@ from android_world import benchmark_state as benchmark_state_lib
 from android_world import checkpointer as checkpointer_lib
 from android_world import constants
 from android_world import episode_runner
+from android_world import progress
 from android_world.agents import base_agent
 from android_world.env import adb_utils
 from android_world.env import interface
@@ -249,6 +250,28 @@ def _run_task(
     _log_and_print('Running task %s with goal "%s"', task.name, task.goal)
     interaction_results = run_episode(task)
     task_successful = task.is_successful(env)
+  except episode_runner.EpisodeInterrupted as e:
+    _log_and_print('Interrupted task %s; saving partial episode.', task.name)
+    try:
+      task.tear_down(env)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception('Failed to tear down interrupted task %s.', task.name)
+    return _create_interrupted_result(task, e, time.time() - start)
+  except KeyboardInterrupt:
+    _log_and_print('Interrupted task %s; saving empty partial episode.', task.name)
+    try:
+      task.tear_down(env)
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception('Failed to tear down interrupted task %s.', task.name)
+    interrupted = episode_runner.EpisodeInterrupted(
+        episode_runner.EpisodeResult(
+            done=False,
+            step_data={},
+            aux_data={'interrupted': True},
+        ),
+        traceback.format_exc(),
+    )
+    return _create_interrupted_result(task, interrupted, time.time() - start)
   except Exception as e:  # pylint: disable=broad-exception-caught
     _log_and_print('%s\nSKIPPING %s.', '~' * 80, task.name)
     logging.exception(
@@ -290,6 +313,39 @@ def _run_task(
     }
     task.tear_down(env)
     return result
+
+
+def _create_interrupted_result(
+    task: task_eval.TaskEval,
+    interrupted: episode_runner.EpisodeInterrupted,
+    run_time: float,
+) -> dict[str, Any]:
+  """Creates a failed result that preserves completed steps on Ctrl-C."""
+  step_data = interrupted.partial_result.step_data
+  aux_data = dict(interrupted.partial_result.aux_data or {})
+  aux_data['interrupted'] = True
+  return {
+      constants.EpisodeConstants.GOAL: task.goal,
+      constants.EpisodeConstants.TASK_TEMPLATE: task.name,
+      constants.EpisodeConstants.EPISODE_DATA: step_data,
+      constants.EpisodeConstants.IS_SUCCESSFUL: 0.0,
+      constants.EpisodeConstants.RUN_TIME: run_time,
+      constants.EpisodeConstants.FINISH_DTIME: datetime.datetime.now(),
+      constants.EpisodeConstants.EPISODE_LENGTH: len(
+          step_data.get(constants.STEP_NUMBER, [])
+      ),
+      constants.EpisodeConstants.AUX_DATA: aux_data,
+      constants.EpisodeConstants.SCREEN_CONFIG: _get_screen_config(task),
+      constants.EpisodeConstants.EXCEPTION_INFO: interrupted.traceback_text,
+      constants.EpisodeConstants.SEED: task.params.get(
+          constants.EpisodeConstants.SEED
+      ),
+  }
+
+
+def _is_interrupted_episode(episode: dict[str, Any]) -> bool:
+  aux_data = episode.get(constants.EpisodeConstants.AUX_DATA)
+  return isinstance(aux_data, dict) and aux_data.get('interrupted') is True
 
 
 def _get_task_info(
@@ -607,7 +663,24 @@ def _run_task_suite(
 
       if configure_runtime_prompt_logger is not None:
         configure_runtime_prompt_logger(instance.name, i)
-      episode = _run_task(instance, run_episode, env, demo_mode=demo_mode)
+      progress.log(
+          'task_instance',
+          'start',
+          task=instance.name,
+          instance_id=i,
+          goal=instance.goal,
+      )
+      with progress.context(task=instance.name, instance_id=i):
+        episode = _run_task(instance, run_episode, env, demo_mode=demo_mode)
+      progress.log(
+          'task_instance',
+          'done',
+          task=instance.name,
+          instance_id=i,
+          success=episode.get(constants.EpisodeConstants.IS_SUCCESSFUL),
+          exception=episode.get(constants.EpisodeConstants.EXCEPTION_INFO)
+          is not None,
+      )
       if (
           episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None
           and check_episode_fn is not None
@@ -622,6 +695,18 @@ def _run_task_suite(
         if benchmark_state_autosave:
           benchmark_state.save()
         _log_and_print('Benchmark state %s -> %s', instance_name, status)
+      if _is_interrupted_episode(episode):
+        progress.log(
+            'task_instance',
+            'error',
+            task=instance.name,
+            instance_id=i,
+            reason='keyboard_interrupt',
+            saved=True,
+        )
+        raise KeyboardInterrupt(
+            f'Benchmark interrupted; saved partial episode {instance_name}.'
+        )
       if (
           prompt_data_out
           and episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None

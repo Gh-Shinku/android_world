@@ -347,6 +347,39 @@ class SuiteUtilsTest(parameterized.TestCase):
 
     self.assertIsNotNone(result[constants.EpisodeConstants.EXCEPTION_INFO])
 
+  def test_run_task_keyboard_interrupt_returns_partial_failed_result(self):
+    mock_run_e2e = mock.MagicMock()
+    partial_result = episode_runner.EpisodeResult(
+        done=False,
+        step_data={constants.STEP_NUMBER: [0], 'foo': ['bar']},
+        aux_data={'interrupted': True},
+    )
+    mock_run_e2e.side_effect = episode_runner.EpisodeInterrupted(
+        partial_result, 'KeyboardInterrupt traceback'
+    )
+    instance = test_utils.FakeCurrentStateEval(
+        test_utils.FakeCurrentStateEval.generate_random_params()
+    )
+
+    result = suite_utils._run_task(
+        instance, mock_run_e2e, mock.MagicMock(), demo_mode=False
+    )
+
+    self.assertEqual(result[constants.EpisodeConstants.IS_SUCCESSFUL], 0.0)
+    self.assertEqual(result[constants.EpisodeConstants.EPISODE_LENGTH], 1)
+    self.assertEqual(
+        result[constants.EpisodeConstants.EPISODE_DATA][
+            constants.STEP_NUMBER
+        ],
+        [0],
+    )
+    self.assertTrue(
+        result[constants.EpisodeConstants.AUX_DATA]['interrupted']
+    )
+    self.assertIn(
+        'KeyboardInterrupt', result[constants.EpisodeConstants.EXCEPTION_INFO]
+    )
+
   @mock.patch.object(suite_utils, '_run_task_suite')
   @mock.patch.object(base_agent, 'EnvironmentInteractingAgent', autospec=True)
   def test_run(
@@ -855,6 +888,78 @@ class RunTaskSuiteTest(absltest.TestCase):
     self.assertEqual(mock_run_e2e.call_count, 1)
     self.assertEqual(state.state['FakeCurrentStateEval_0'], benchmark_state.FAIL)
     self.assertNotIn('FakeAdbEval_0', state.state)
+
+  @mock.patch.object(time, 'sleep', autospec=True)
+  @mock.patch.object(interface, 'AsyncAndroidEnv')
+  @mock.patch.object(adb_utils, 'send_android_intent')
+  @mock.patch.object(checkpointer, 'Checkpointer')
+  def test_keyboard_interrupt_saves_episode_and_benchmark_state_before_exit(
+      self,
+      mock_checkpointer,
+      unused_mock_send_android_intent,
+      mock_env,
+      unused_mock_sleep,
+  ):
+    mock_checkpointer.load.return_value = []
+    mock_env.get_state.return_value = (
+        dm_env.TimeStep(
+            observation={'pixels': np.zeros((3, 3, 3))},
+            reward=0,
+            discount=0,
+            step_type=dm_env.StepType.LAST,
+        ),
+        [],
+    )
+    partial_result = episode_runner.EpisodeResult(
+        False,
+        {constants.STEP_NUMBER: [0]},
+        aux_data={'interrupted': True},
+    )
+    mock_run_e2e = mock.MagicMock()
+    mock_run_e2e.side_effect = episode_runner.EpisodeInterrupted(
+        partial_result, 'KeyboardInterrupt traceback'
+    )
+    state = benchmark_state.BenchmarkState(
+        self.create_tempfile().full_path,
+        {'FakeCurrentStateEval_0': benchmark_state.FAIL},
+    )
+    suite = suite_utils.Suite(
+        **{
+            'FakeCurrentStateEval': [
+                test_utils.FakeCurrentStateEval(
+                    test_utils.FakeCurrentStateEval.generate_random_params()
+                ),
+            ],
+        },
+    )
+    suite.suite_family = 'android'
+
+    with self.assertRaises(KeyboardInterrupt):
+      suite_utils._run_task_suite(
+          suite,
+          mock_run_e2e,
+          mock_env,
+          mock_checkpointer,
+          benchmark_state=state,
+      )
+
+    mock_checkpointer.save_episodes.assert_called_once()
+    saved_episode = mock_checkpointer.save_episodes.call_args.args[0][0]
+    self.assertTrue(
+        saved_episode[constants.EpisodeConstants.AUX_DATA]['interrupted']
+    )
+    self.assertEqual(
+        saved_episode[constants.EpisodeConstants.EPISODE_DATA][
+            constants.STEP_NUMBER
+        ],
+        [0],
+    )
+    self.assertEqual(
+        saved_episode[constants.EpisodeConstants.IS_SUCCESSFUL], 0.0
+    )
+    self.assertEqual(
+        state.state['FakeCurrentStateEval_0'], benchmark_state.FAIL
+    )
 
 
 if __name__ == '__main__':

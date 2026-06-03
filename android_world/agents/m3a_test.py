@@ -130,6 +130,37 @@ class M3AInteractionTest(absltest.TestCase):
     self.assertTrue(step2_data.done)
     self.assertLen(agent.history, 2)
 
+  def test_step_logs_progress_stages(self):
+    env = test_utils.FakeAsyncEnv()
+    llm = MockMultimodalLlmWrapper([
+        (
+            (
+                "Reason: answer question.\nAction: {'action_type': 'answer',"
+                " 'text': 'fake answer.'}"
+            ),
+            'test raw response',
+        ),
+        (
+            'fake summary',
+            'test raw response',
+        ),
+    ])
+    self.mock_get_orientation.side_effect = [0, 0]
+    self.mock_get_physical_frame_boundary.side_effect = [
+        [0, 0, 100, 100],
+        [0, 0, 100, 100],
+    ]
+    agent = m3a.M3A(env, llm)
+
+    with mock.patch.object(m3a.progress, 'log') as mock_log:
+      step_data = agent.step('do something')
+
+    self.assertFalse(step_data.done)
+    stages = [call.args[0] for call in mock_log.call_args_list]
+    self.assertIn('llm_action', stages)
+    self.assertIn('execute_action', stages)
+    self.assertIn('llm_summary', stages)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -30,6 +30,8 @@ import numpy as np
 from openai import OpenAI
 from PIL import Image
 
+from android_world import progress
+
 
 ERROR_CALLING_LLM = 'Error calling LLM'
 
@@ -159,23 +161,46 @@ class GeminiGcpWrapper(LlmWrapper, MultimodalLlmWrapper):
     counter = self.max_retry
     retry_delay = 1.0
     output = None
+    attempt = 0
     while counter > 0:
+      attempt += 1
       try:
-        output = self.llm.generate_content(
-            [text_prompt] + [Image.fromarray(image) for image in images],
-            safety_settings=None
-            if enable_safety_checks
-            else SAFETY_SETTINGS_BLOCK_NONE,
-            generation_config=generation_config,
-        )
+        with progress.span(
+            'llm_api',
+            provider='gemini_gcp',
+            attempt=attempt,
+        ):
+          output = self.llm.generate_content(
+              [text_prompt] + [Image.fromarray(image) for image in images],
+              safety_settings=None
+              if enable_safety_checks
+              else SAFETY_SETTINGS_BLOCK_NONE,
+              generation_config=generation_config,
+          )
         return output.text, True, output
       except Exception as e:  # pylint: disable=broad-exception-caught
         counter -= 1
-        print('Error calling LLM, will retry in {retry_delay} seconds')
+        print(
+            f'Error calling LLM, will retry in {retry_delay} seconds',
+            flush=True,
+        )
         print(e)
         if counter > 0:
           # Expo backoff
+          progress.log(
+              'llm_retry_sleep',
+              'start',
+              provider='gemini_gcp',
+              attempt=attempt,
+              sleep_seconds=retry_delay,
+          )
           time.sleep(retry_delay)
+          progress.log(
+              'llm_retry_sleep',
+              'done',
+              provider='gemini_gcp',
+              attempt=attempt,
+          )
           retry_delay *= 2
 
     if (output is not None) and (not self.is_safe(output)):
@@ -205,23 +230,46 @@ class GeminiGcpWrapper(LlmWrapper, MultimodalLlmWrapper):
     counter = self.max_retry
     retry_delay = 1.0
     response = None
+    attempt = 0
     if isinstance(contents, list):
       contents = self.convert_content(contents)
     while counter > 0:
+      attempt += 1
       try:
-        response = self.llm.generate_content(
-            contents=contents,
-            safety_settings=safety_settings,
-            generation_config=generation_config,
-        )
+        with progress.span(
+            'llm_api',
+            provider='gemini_gcp',
+            attempt=attempt,
+        ):
+          response = self.llm.generate_content(
+              contents=contents,
+              safety_settings=safety_settings,
+              generation_config=generation_config,
+          )
         return response.text, response
       except Exception as e:  # pylint: disable=broad-exception-caught
         counter -= 1
-        print('Error calling LLM, will retry in {retry_delay} seconds')
+        print(
+            f'Error calling LLM, will retry in {retry_delay} seconds',
+            flush=True,
+        )
         print(e)
         if counter > 0:
           # Expo backoff
+          progress.log(
+              'llm_retry_sleep',
+              'start',
+              provider='gemini_gcp',
+              attempt=attempt,
+              sleep_seconds=retry_delay,
+          )
           time.sleep(retry_delay)
+          progress.log(
+              'llm_retry_sleep',
+              'done',
+              provider='gemini_gcp',
+              attempt=attempt,
+          )
           retry_delay *= 2
     raise RuntimeError(f'Error calling LLM. {response}.')
 
@@ -339,9 +387,17 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
 
     counter = self.max_retry
     wait_seconds = self.RETRY_WAITING_SECONDS
+    attempt = 0
     while counter > 0:
+      attempt += 1
       try:
-        response = self.client.chat.completions.create(**request_kwargs)
+        with progress.span(
+            'llm_api',
+            provider='openai_compatible',
+            model=self.model,
+            attempt=attempt,
+        ):
+          response = self.client.chat.completions.create(**request_kwargs)
         if response.choices:
           return (
               response.choices[0].message.content,
@@ -350,12 +406,42 @@ class Gpt4Wrapper(LlmWrapper, MultimodalLlmWrapper):
           )
         print('Error calling OpenAI API: response did not include choices.')
         counter -= 1
+        progress.log(
+            'llm_retry_sleep',
+            'start',
+            provider='openai_compatible',
+            model=self.model,
+            attempt=attempt,
+            sleep_seconds=wait_seconds,
+        )
         time.sleep(wait_seconds)
+        progress.log(
+            'llm_retry_sleep',
+            'done',
+            provider='openai_compatible',
+            model=self.model,
+            attempt=attempt,
+        )
         wait_seconds *= 2
       except Exception as e:  # pylint: disable=broad-exception-caught
         # Want to catch all exceptions happened during LLM calls.
         counter -= 1
+        progress.log(
+            'llm_retry_sleep',
+            'start',
+            provider='openai_compatible',
+            model=self.model,
+            attempt=attempt,
+            sleep_seconds=wait_seconds,
+        )
         time.sleep(wait_seconds)
+        progress.log(
+            'llm_retry_sleep',
+            'done',
+            provider='openai_compatible',
+            model=self.model,
+            attempt=attempt,
+        )
         wait_seconds *= 2
         print('Error calling LLM, will retry soon...')
         print(e)

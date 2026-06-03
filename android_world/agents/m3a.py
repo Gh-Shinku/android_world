@@ -21,6 +21,7 @@ from android_world.agents import agent_utils
 from android_world.agents import base_agent
 from android_world.agents import infer
 from android_world.agents import m3a_utils
+from android_world import progress
 from android_world.env import interface
 from android_world.env import json_action
 from android_world.env import representation_utils
@@ -463,6 +464,7 @@ class M3A(base_agent.EnvironmentInteractingAgent):
     self.history = []
 
   def step(self, goal: str) -> base_agent.AgentInteractionResult:
+    step_number = len(self.history) + 1
     step_data = {
         'raw_screenshot': None,
         'before_screenshot_with_som': None,
@@ -483,25 +485,27 @@ class M3A(base_agent.EnvironmentInteractingAgent):
         'resolved_action': None,
         'ui_state_compile_report': None,
     }
-    logging.info('----------step %s----------', str(len(self.history) + 1))
+    logging.info('----------step %s----------', str(step_number))
 
-    state = self.get_post_transition_state()
+    with progress.span('get_before_state', step=step_number):
+      state = self.get_post_transition_state()
     logical_screen_size = self.env.logical_screen_size
     orientation = self.env.orientation
     physical_frame_boundary = self.env.physical_frame_boundary
 
     before_ui_elements = state.ui_elements
     step_data['before_ui_elements'] = before_ui_elements
-    before_ui_elements_list = _generate_ui_elements_description_list(
-        before_ui_elements, logical_screen_size
-    )
     activity = self.env.foreground_activity_name
-    ui_state_view = self.ui_state_provider.build(
-        state,
-        screen_size=logical_screen_size,
-        app_name=activity.split('/')[0] if activity else '',
-        activity=activity,
-    )
+    with progress.span('build_ui_state', step=step_number):
+      before_ui_elements_list = _generate_ui_elements_description_list(
+          before_ui_elements, logical_screen_size
+      )
+      ui_state_view = self.ui_state_provider.build(
+          state,
+          screen_size=logical_screen_size,
+          app_name=activity.split('/')[0] if activity else '',
+          activity=activity,
+      )
     step_data['ui_state_mode'] = ui_state_view.mode
     step_data['before_ui_state_text'] = ui_state_view.prompt_text
     step_data['before_action_map'] = ui_state_view.action_map
@@ -527,28 +531,30 @@ class M3A(base_agent.EnvironmentInteractingAgent):
         'Step ' + str(i + 1) + '- ' + step_info['summary']
         for i, step_info in enumerate(self.history)
     ]
-    if ui_state_view.mode == 'compiled':
-      action_prompt = _compiled_action_selection_prompt(
-          goal,
-          history,
-          ui_state_view.prompt_text,
-          self.additional_guidelines,
-      )
-    else:
-      action_prompt = _action_selection_prompt(
-          goal,
-          history,
-          before_ui_elements_list,
-          self.additional_guidelines,
-      )
+    with progress.span('build_action_prompt', step=step_number):
+      if ui_state_view.mode == 'compiled':
+        action_prompt = _compiled_action_selection_prompt(
+            goal,
+            history,
+            ui_state_view.prompt_text,
+            self.additional_guidelines,
+        )
+      else:
+        action_prompt = _action_selection_prompt(
+            goal,
+            history,
+            before_ui_elements_list,
+            self.additional_guidelines,
+        )
     step_data['action_prompt'] = action_prompt
-    action_output, is_safe, raw_response = self.llm.predict_mm(
-        action_prompt,
-        [
-            step_data['raw_screenshot'],
-            before_screenshot,
-        ],
-    )
+    with progress.span('llm_action', step=step_number):
+      action_output, is_safe, raw_response = self.llm.predict_mm(
+          action_prompt,
+          [
+              step_data['raw_screenshot'],
+              before_screenshot,
+          ],
+      )
 
     if is_safe == False:  # pylint: disable=singleton-comparison
       #  is_safe could be None
@@ -560,7 +566,8 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['action_output'] = action_output
     step_data['action_raw_response'] = raw_response
 
-    reason, action = m3a_utils.parse_reason_action_output(action_output)
+    with progress.span('parse_action', step=step_number):
+      reason, action = m3a_utils.parse_reason_action_output(action_output)
 
     # If the output is not in the right format, add it to step summary which
     # will be passed to next step and return.
@@ -582,10 +589,11 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['action_reason'] = reason
 
     try:
-      converted_action = json_action.JSONAction(
-          **agent_utils.extract_json(action),
-      )
-      step_data['action_output_json'] = converted_action
+      with progress.span('parse_action_json', step=step_number):
+        converted_action = json_action.JSONAction(
+            **agent_utils.extract_json(action),
+        )
+        step_data['action_output_json'] = converted_action
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.info('Failed to convert the output to a valid action.')
       logging.info(str(e))
@@ -605,11 +613,12 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     num_ui_elements = len(before_ui_elements)
     if ui_state_view.mode == 'compiled' and converted_action.target:
       try:
-        converted_action = action_resolver.CompiledActionResolver(
-            ui_state_view.action_map
-        ).resolve(converted_action)
-        step_data['resolved_action'] = converted_action.as_dict()
-        action_index = converted_action.index
+        with progress.span('resolve_action', step=step_number):
+          converted_action = action_resolver.CompiledActionResolver(
+              ui_state_view.action_map
+          ).resolve(converted_action)
+          step_data['resolved_action'] = converted_action.as_dict()
+          action_index = converted_action.index
       except Exception as e:  # pylint: disable=broad-exception-caught
         step_data['summary'] = (
             'Can not resolve the UI-state target to an executable action: '
@@ -662,7 +671,12 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
       logging.info('Agent answered with: %s', converted_action.text)
 
     try:
-      self.env.execute_action(converted_action)
+      with progress.span(
+          'execute_action',
+          step=step_number,
+          action_type=converted_action.action_type,
+      ):
+        self.env.execute_action(converted_action)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.info('Failed to execute action.')
       logging.info(str(e))
@@ -675,27 +689,28 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
           step_data,
       )
 
-    time.sleep(self.wait_after_action_seconds)
+    with progress.span('get_after_state', step=step_number):
+      time.sleep(self.wait_after_action_seconds)
 
-    state = self.env.get_state(wait_to_stabilize=False)
-    logical_screen_size = self.env.logical_screen_size
-    orientation = self.env.orientation
-    physical_frame_boundary = self.env.physical_frame_boundary
-    after_ui_elements = state.ui_elements
-    after_ui_elements_list = _generate_ui_elements_description_list(
-        after_ui_elements, logical_screen_size
-    )
-    after_screenshot = state.pixels.copy()
-    for index, ui_element in enumerate(after_ui_elements):
-      if m3a_utils.validate_ui_element(ui_element, logical_screen_size):
-        m3a_utils.add_ui_element_mark(
-            after_screenshot,
-            ui_element,
-            index,
-            logical_screen_size,
-            physical_frame_boundary,
-            orientation,
-        )
+      state = self.env.get_state(wait_to_stabilize=False)
+      logical_screen_size = self.env.logical_screen_size
+      orientation = self.env.orientation
+      physical_frame_boundary = self.env.physical_frame_boundary
+      after_ui_elements = state.ui_elements
+      after_ui_elements_list = _generate_ui_elements_description_list(
+          after_ui_elements, logical_screen_size
+      )
+      after_screenshot = state.pixels.copy()
+      for index, ui_element in enumerate(after_ui_elements):
+        if m3a_utils.validate_ui_element(ui_element, logical_screen_size):
+          m3a_utils.add_ui_element_mark(
+              after_screenshot,
+              ui_element,
+              index,
+              logical_screen_size,
+              physical_frame_boundary,
+              orientation,
+          )
 
     m3a_utils.add_screenshot_label(
         step_data['before_screenshot_with_som'], 'before'
@@ -703,20 +718,22 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     m3a_utils.add_screenshot_label(after_screenshot, 'after')
     step_data['after_screenshot_with_som'] = after_screenshot.copy()
 
-    summary_prompt = _summarize_prompt(
-        action,
-        reason,
-        goal,
-        before_ui_elements_list,
-        after_ui_elements_list,
-    )
-    summary, is_safe, raw_response = self.llm.predict_mm(
-        summary_prompt,
-        [
-            before_screenshot,
-            after_screenshot,
-        ],
-    )
+    with progress.span('build_summary_prompt', step=step_number):
+      summary_prompt = _summarize_prompt(
+          action,
+          reason,
+          goal,
+          before_ui_elements_list,
+          after_ui_elements_list,
+      )
+    with progress.span('llm_summary', step=step_number):
+      summary, is_safe, raw_response = self.llm.predict_mm(
+          summary_prompt,
+          [
+              before_screenshot,
+              after_screenshot,
+          ],
+      )
 
     if is_safe == False:  # pylint: disable=singleton-comparison
       #  is_safe could be None

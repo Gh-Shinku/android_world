@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Any
+from unittest import mock
 from absl.testing import absltest
 from android_world.agents import infer
 from android_world.agents import t3a
@@ -109,6 +110,32 @@ class T3AInteractionTest(absltest.TestCase):
     step2_data = agent.step(goal)
     self.assertTrue(step2_data.done)
     self.assertLen(agent.history, 2)
+
+  def test_step_logs_progress_stages(self):
+    env = test_utils.FakeAsyncEnv()
+    mock_llm = MockLlmWrapper([
+        (
+            (
+                "Reason: answer.\nAction: {'action_type': 'answer',"
+                " 'text': 'mock_response'}"
+            ),
+            "fake_response_1",
+        ),
+        (
+            "fake_summary",
+            "fake_response_2",
+        ),
+    ])
+    agent = t3a.T3A(env, mock_llm)
+
+    with mock.patch.object(t3a.progress, 'log') as mock_log:
+      step_data = agent.step("do something")
+
+    self.assertFalse(step_data.done)
+    stages = [call.args[0] for call in mock_log.call_args_list]
+    self.assertIn('llm_action', stages)
+    self.assertIn('execute_action', stages)
+    self.assertIn('llm_summary', stages)
 
 
 if __name__ == "__main__":

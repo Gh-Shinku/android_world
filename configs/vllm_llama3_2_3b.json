@@ -1,0 +1,12 @@
+{
+  "provider": "vllm",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "/mnt/sda/zyt/models/Llama-3.2-3B-Instruct",
+  "api_key_env": "VLLM_API_KEY",
+  "api_key": "",
+  "temperature": 0.0,
+  "max_tokens": 1000,
+  "max_retry": 3,
+  "extra_request_kwargs": {},
+  "extra_body": {}
+}

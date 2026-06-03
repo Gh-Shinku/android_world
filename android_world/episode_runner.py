@@ -15,8 +15,10 @@
 """Runs an agent on the environment."""
 
 import dataclasses
+import traceback
 from typing import Any, Callable, Optional
 from android_world import constants
+from android_world import progress
 from android_world.agents import base_agent
 from android_world.env import interface
 import termcolor
@@ -37,6 +39,17 @@ class EpisodeResult:
   step_data: dict[str, Any]
   env_reward: Optional[float] = None
   aux_data: Optional[dict[str, Any]] = None
+
+
+class EpisodeInterrupted(Exception):
+  """Raised when an episode is interrupted after collecting partial data."""
+
+  def __init__(
+      self, partial_result: EpisodeResult, traceback_text: str
+  ) -> None:
+    super().__init__('Episode interrupted by KeyboardInterrupt.')
+    self.partial_result = partial_result
+    self.traceback_text = traceback_text
 
 
 def run_episode(
@@ -77,29 +90,53 @@ def run_episode(
   agent.set_max_steps(max_n_steps)
 
   output = []
-  for step_n in range(max_n_steps):
-    result = agent.step(goal)
-    print_fn('Completed step {:d}.'.format(step_n + 1))
-    assert constants.STEP_NUMBER not in result.data
-    output.append(result.data | {constants.STEP_NUMBER: step_n})
-    if termination_fn(agent.env):
-      print_fn('Environment ends episode.')
-      return EpisodeResult(
-          done=True,
-          step_data=_transpose_lod_to_dol(output),
-      )
-    elif result.done:
-      print_fn('Agent indicates task is done.')
-      return EpisodeResult(
-          done=result.done,
-          step_data=_transpose_lod_to_dol(output),
-      )
+  progress.log('episode', 'start', print_fn=print_fn, max_steps=max_n_steps)
+  try:
+    for step_n in range(max_n_steps):
+      progress.log('step', 'start', step=step_n + 1, print_fn=print_fn)
+      with progress.span('agent_step', step=step_n + 1, print_fn=print_fn):
+        result = agent.step(goal)
+      print_fn('Completed step {:d}.'.format(step_n + 1))
+      progress.log('step', 'done', step=step_n + 1, print_fn=print_fn)
+      assert constants.STEP_NUMBER not in result.data
+      output.append(result.data | {constants.STEP_NUMBER: step_n})
+      if termination_fn(agent.env):
+        print_fn('Environment ends episode.')
+        progress.log(
+            'episode', 'done', print_fn=print_fn, reason='environment'
+        )
+        return EpisodeResult(
+            done=True,
+            step_data=_transpose_lod_to_dol(output),
+        )
+      elif result.done:
+        print_fn('Agent indicates task is done.')
+        progress.log('episode', 'done', print_fn=print_fn, reason='agent')
+        return EpisodeResult(
+            done=result.done,
+            step_data=_transpose_lod_to_dol(output),
+        )
+  except KeyboardInterrupt as exc:
+    progress.log(
+        'episode',
+        'error',
+        print_fn=print_fn,
+        reason='keyboard_interrupt',
+        completed_steps=len(output),
+    )
+    partial_result = EpisodeResult(
+        done=False,
+        step_data=_transpose_lod_to_dol(output),
+        aux_data={'interrupted': True},
+    )
+    raise EpisodeInterrupted(partial_result, traceback.format_exc()) from exc
   print_fn(
       termcolor.colored(
           'Agent did not indicate task is done. Reached max number of steps.',
           'red',
       )
   )
+  progress.log('episode', 'done', print_fn=print_fn, reason='max_steps')
   return EpisodeResult(
       done=result.done, step_data=_transpose_lod_to_dol(output)  # pylint: disable=undefined-variable
   )

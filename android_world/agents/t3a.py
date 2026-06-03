@@ -20,6 +20,7 @@ from android_world.agents import agent_utils
 from android_world.agents import base_agent
 from android_world.agents import infer
 from android_world.agents import m3a_utils
+from android_world import progress
 from android_world.env import adb_utils
 from android_world.env import interface
 from android_world.env import json_action
@@ -402,6 +403,7 @@ class T3A(base_agent.EnvironmentInteractingAgent):
     self.runtime_prompt_logger = runtime_prompt_logger
 
   def step(self, goal: str) -> base_agent.AgentInteractionResult:
+    step_number = len(self.history) + 1
     step_data = {
         'before_screenshot': None,
         'after_screenshot': None,
@@ -420,23 +422,25 @@ class T3A(base_agent.EnvironmentInteractingAgent):
         'resolved_action': None,
         'ui_state_compile_report': None,
     }
-    print('----------step ' + str(len(self.history) + 1))
+    print('----------step ' + str(step_number))
 
-    state = self.get_post_transition_state()
+    with progress.span('get_before_state', step=step_number):
+      state = self.get_post_transition_state()
     logical_screen_size = self.env.logical_screen_size
 
     ui_elements = state.ui_elements
-    before_element_list = _generate_ui_elements_description_list_full(
-        ui_elements,
-        logical_screen_size,
-    )
     activity = self.env.foreground_activity_name
-    ui_state_view = self.ui_state_provider.build(
-        state,
-        screen_size=logical_screen_size,
-        app_name=activity.split('/')[0] if activity else '',
-        activity=activity,
-    )
+    with progress.span('build_ui_state', step=step_number):
+      before_element_list = _generate_ui_elements_description_list_full(
+          ui_elements,
+          logical_screen_size,
+      )
+      ui_state_view = self.ui_state_provider.build(
+          state,
+          screen_size=logical_screen_size,
+          app_name=activity.split('/')[0] if activity else '',
+          activity=activity,
+      )
     step_data['ui_state_mode'] = ui_state_view.mode
     step_data['before_ui_state_text'] = ui_state_view.prompt_text
     step_data['before_action_map'] = ui_state_view.action_map
@@ -451,20 +455,21 @@ class T3A(base_agent.EnvironmentInteractingAgent):
         'Step ' + str(i + 1) + ': ' + step_info['summary']
         for i, step_info in enumerate(self.history)
     ]
-    if ui_state_view.mode == 'compiled':
-      action_prompt = _compiled_action_selection_prompt(
-          goal,
-          history,
-          ui_state_view.prompt_text,
-          self.additional_guidelines,
-      )
-    else:
-      action_prompt = _action_selection_prompt(
-          goal,
-          history,
-          before_element_list,
-          self.additional_guidelines,
-      )
+    with progress.span('build_action_prompt', step=step_number):
+      if ui_state_view.mode == 'compiled':
+        action_prompt = _compiled_action_selection_prompt(
+            goal,
+            history,
+            ui_state_view.prompt_text,
+            self.additional_guidelines,
+        )
+      else:
+        action_prompt = _action_selection_prompt(
+            goal,
+            history,
+            before_element_list,
+            self.additional_guidelines,
+        )
     step_data['action_prompt'] = action_prompt
     if self.runtime_prompt_logger is not None:
       self.runtime_prompt_logger(
@@ -474,9 +479,10 @@ class T3A(base_agent.EnvironmentInteractingAgent):
           step_number=len(self.history),
           ui_state_mode=ui_state_view.mode,
       )
-    action_output, is_safe, raw_response = self.llm.predict(
-        action_prompt,
-    )
+    with progress.span('llm_action', step=step_number):
+      action_output, is_safe, raw_response = self.llm.predict(
+          action_prompt,
+      )
 
     if is_safe == False:  # pylint: disable=singleton-comparison
       #  is_safe could be None
@@ -489,7 +495,8 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['action_output'] = action_output
     step_data['action_raw_response'] = raw_response
 
-    reason, action = m3a_utils.parse_reason_action_output(action_output)
+    with progress.span('parse_action', step=step_number):
+      reason, action = m3a_utils.parse_reason_action_output(action_output)
 
     # If the output is not in the right format, add it to step summary which
     # will be passed to next step and return.
@@ -510,9 +517,10 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     print('Reason: ' + reason)
 
     try:
-      converted_action = json_action.JSONAction(
-          **agent_utils.extract_json(action),
-      )
+      with progress.span('parse_action_json', step=step_number):
+        converted_action = json_action.JSONAction(
+            **agent_utils.extract_json(action),
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
       print('Failed to convert the output to a valid action.')
       print(str(e))
@@ -529,10 +537,11 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
 
     if ui_state_view.mode == 'compiled' and converted_action.target:
       try:
-        converted_action = action_resolver.CompiledActionResolver(
-            ui_state_view.action_map
-        ).resolve(converted_action)
-        step_data['resolved_action'] = converted_action.as_dict()
+        with progress.span('resolve_action', step=step_number):
+          converted_action = action_resolver.CompiledActionResolver(
+              ui_state_view.action_map
+          ).resolve(converted_action)
+          step_data['resolved_action'] = converted_action.as_dict()
       except Exception as e:  # pylint: disable=broad-exception-caught
         step_data['summary'] = (
             'Can not resolve the UI-state target to an executable action: '
@@ -580,7 +589,12 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
       print('Agent answered with: ' + converted_action.text)
 
     try:
-      self.env.execute_action(converted_action)
+      with progress.span(
+          'execute_action',
+          step=step_number,
+          action_type=converted_action.action_type,
+      ):
+        self.env.execute_action(converted_action)
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(
           'Some error happened executing the action ',
@@ -598,7 +612,8 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
           step_data,
       )
 
-    state = self.get_post_transition_state()
+    with progress.span('get_after_state', step=step_number):
+      state = self.get_post_transition_state()
     ui_elements = state.ui_elements
 
     after_element_list = _generate_ui_elements_description_list_full(
@@ -610,17 +625,19 @@ Action: {{"action_type": "status", "goal_status": "infeasible"}}"""
     step_data['after_screenshot'] = state.pixels.copy()
     step_data['after_element_list'] = ui_elements
 
-    summary_prompt = _summarize_prompt(
-        goal,
-        action,
-        reason,
-        before_element_list,
-        after_element_list,
-    )
+    with progress.span('build_summary_prompt', step=step_number):
+      summary_prompt = _summarize_prompt(
+          goal,
+          action,
+          reason,
+          before_element_list,
+          after_element_list,
+      )
 
-    summary, is_safe, raw_response = self.llm.predict(
-        summary_prompt,
-    )
+    with progress.span('llm_summary', step=step_number):
+      summary, is_safe, raw_response = self.llm.predict(
+          summary_prompt,
+      )
     if is_safe == False:  # pylint: disable=singleton-comparison
       #  is_safe could be None
       summary = """Summary triggered LLM safety classifier."""

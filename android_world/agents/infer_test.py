@@ -130,8 +130,12 @@ class InferTest(absltest.TestCase):
         mock_response,
     ]
 
-    gpt4v.predict_mm("fake prompt", [])
+    with mock.patch.object(infer.progress, 'log') as mock_log:
+      gpt4v.predict_mm("fake prompt", [])
     self.mock_sleep.assert_called_once()
+    stages = [call.args[0] for call in mock_log.call_args_list]
+    self.assertIn('llm_api', stages)
+    self.assertIn('llm_retry_sleep', stages)
 
   def test_openai_compatible_extra_body_and_request_kwargs(self):
     llm = infer.Gpt4Wrapper(

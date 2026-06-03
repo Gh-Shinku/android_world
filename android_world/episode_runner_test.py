@@ -29,16 +29,20 @@ class FakeEnvironmentInteractingAgent(base_agent.EnvironmentInteractingAgent):
       name: str,
       return_done: bool = False,
       return_data: dict[str, Any] | None = None,
+      interrupt_on_call: int | None = None,
   ):
     super().__init__(env, name)
     self.return_done = return_done
     self.return_data = return_data
+    self.interrupt_on_call = interrupt_on_call
     self.call_count = 0
     if return_data is None:
       self.return_data = {}
 
   def step(self, goal: str) -> base_agent.AgentInteractionResult:
     self.call_count += 1
+    if self.interrupt_on_call == self.call_count:
+      raise KeyboardInterrupt
     return base_agent.AgentInteractionResult(
         done=self.return_done, data=self.return_data
     )
@@ -88,6 +92,37 @@ class EpisodeRunnerTest(absltest.TestCase):
     )
 
     mock_agent.env.reset.assert_called_with(go_home=True)
+
+  def test_keyboard_interrupt_preserves_completed_steps(self):
+    mock_agent = FakeEnvironmentInteractingAgent(
+        self.env,
+        'fake_agent',
+        return_data={'foo': 'bar'},
+        interrupt_on_call=2,
+    )
+
+    with self.assertRaises(episode_runner.EpisodeInterrupted) as cm:
+      episode_runner.run_episode('test_goal', mock_agent, max_n_steps=3)
+
+    self.assertEqual(mock_agent.call_count, 2)
+    self.assertEqual(
+        cm.exception.partial_result.step_data[constants.STEP_NUMBER], [0]
+    )
+    self.assertEqual(cm.exception.partial_result.step_data['foo'], ['bar'])
+    self.assertTrue(cm.exception.partial_result.aux_data['interrupted'])
+    self.assertIn('KeyboardInterrupt', cm.exception.traceback_text)
+
+  def test_keyboard_interrupt_before_first_completed_step(self):
+    mock_agent = FakeEnvironmentInteractingAgent(
+        self.env, 'fake_agent', interrupt_on_call=1
+    )
+
+    with self.assertRaises(episode_runner.EpisodeInterrupted) as cm:
+      episode_runner.run_episode('test_goal', mock_agent, max_n_steps=3)
+
+    self.assertEqual(mock_agent.call_count, 1)
+    self.assertEmpty(cm.exception.partial_result.step_data)
+    self.assertTrue(cm.exception.partial_result.aux_data['interrupted'])
 
 
 if __name__ == '__main__':
