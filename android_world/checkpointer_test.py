@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import tempfile
 from absl.testing import absltest
@@ -39,6 +40,20 @@ class CheckpointerTest(absltest.TestCase):
     self.checkpointer.save_episodes(task_group2, 'task_group2')
     loaded_data = self.checkpointer.load()
     self.assertCountEqual(loaded_data, task_group1 + task_group2)
+
+  def test_save_writes_prompt_compare_sidecar(self) -> None:
+    task_group = [{'goal': 'Goal', 'task_template': 'Task', 'episode_data': {}}]
+    self.checkpointer.save_episodes(task_group, 'task_group')
+
+    sidecar_file = os.path.join(
+        self.temp_dir.name, 'task_group.prompt_compare.json'
+    )
+    self.assertTrue(os.path.exists(sidecar_file))
+    with open(sidecar_file, encoding='utf-8') as f:
+      sidecar = json.load(f)
+    self.assertEqual(
+        {'goal': 'Goal', 'task_template': 'Task', 'steps': []}, sidecar
+    )
 
   def test_load_empty_directory(self) -> None:
     """Tests if loading an empty directory returns empty data."""
@@ -76,6 +91,19 @@ class CheckpointerTest(absltest.TestCase):
       f.write('invalid data')
     loaded_data = self.checkpointer.load()
     self.assertEqual([], loaded_data)
+
+  def test_load_ignores_prompt_compare_sidecar(self) -> None:
+    task_group = [{'key': 'value'}]
+    self.checkpointer.save_episodes(task_group, 'task_group')
+    sidecar_file = os.path.join(
+        self.temp_dir.name, 'another.prompt_compare.json'
+    )
+    with open(sidecar_file, 'w', encoding='utf-8') as f:
+      json.dump({'invalid': 'checkpoint'}, f)
+
+    loaded_data = self.checkpointer.load()
+
+    self.assertEqual(task_group, loaded_data)
 
   def test_load_fields(self) -> None:
     """Tests if loading fields works as expected."""

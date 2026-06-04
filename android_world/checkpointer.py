@@ -23,6 +23,7 @@ import pickle
 from typing import Any
 
 from absl import logging
+from android_world import prompt_compare_export
 
 INSTANCE_SEPARATOR = '_'
 
@@ -127,6 +128,23 @@ class IncrementalCheckpointer(Checkpointer):
       compressed = _gzip_pickle(task_episodes)
       f.write(compressed)
     logging.info('Wrote task episodes for %s to %s', task_name, filename)
+    sidecar_filename = os.path.join(
+        self.directory, f'{task_name}.prompt_compare.json'
+    )
+    try:
+      prompt_compare_export.write_prompt_compare(
+          task_episodes, sidecar_filename
+      )
+      logging.info(
+          'Wrote prompt comparison for %s to %s', task_name, sidecar_filename
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning(
+          'Unable to write prompt comparison for %s to %s: %s',
+          task_name,
+          sidecar_filename,
+          e,
+      )
 
   def load(self, fields: list[str] | None = None) -> list[Episode]:
     """Loads all task groups from disk."""
