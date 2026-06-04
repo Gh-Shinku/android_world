@@ -11,7 +11,7 @@
     "tasks": null,
     "first_k_tasks": 0,
     "n_task_combinations": 1,
-    "max_steps": 20,
+    "max_steps": 10,
     "fixed_task_seed": false
   },
   "agent": {

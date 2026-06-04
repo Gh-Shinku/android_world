@@ -1,27 +1,29 @@
 ANDROID_WORLD_PYTHON ?= /mnt/sda/zyt/miniconda3/envs/android_world/bin/python
 CONSOLE_PORT ?= 5554
+DEVICE_SERIAL ?= emulator-$(CONSOLE_PORT)
 GRPC_PORT ?= 8554
 SCREENSHOT_DIR ?= data/screenshots
 
 # ---- Benchmark ----
 RUN_CONFIG ?= configs/runs/compiled.json
-LLM_CONFIG ?= configs/bailian.example.json
+LLM_CONFIG ?= configs/deepseek.json
 ARGS ?=
 
 # ---- Post-processing ----
-RUN_DIR ?= runs/run_20260603T191233865199
+RUN_DIR ?= runs/run_20260604T004057501741
 TOKENIZER ?= /mnt/sda/zyt/models/Llama-3.2-3B-Instruct
 BENCHMARK_STATE ?= runs/benchmark_state.txt
 RETROFIT_OUTPUT_DIR ?= runs/tmp
 
 .PHONY: help \
-	emulator check-emulator screenshot install-apps install-package \
+	emulator wait-emulator check-emulator screenshot install-apps install-package \
 	run run-debug run-compiled \
 	summarize export export-fail retrofit-readable state-init state-rerun
 
 help:
 	@echo "Infrastructure:"
 	@echo "  make emulator          Start the headless Android emulator"
+	@echo "  make wait-emulator     Wait until the emulator is visible to ADB and booted"
 	@echo "  make check-emulator    Check whether the emulator has finished booting"
 	@echo "  make screenshot        Capture a screenshot from the running emulator"
 	@echo "  make install-apps      Install and initialize all Android World apps"
@@ -61,20 +63,29 @@ emulator:
 		> ./logs/androidworld-emulator-$$(date +%Y%m%d-%H%M%S).log 2>&1
 
 check-emulator:
-	@BOOT_STATUS=$$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); \
+	@BOOT_STATUS=$$(adb -s $(DEVICE_SERIAL) shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); \
 	if [ "$$BOOT_STATUS" = "1" ]; then \
 		echo "ok"; \
 	else \
 		echo "not boot"; \
 	fi
 
-screenshot:
+wait-emulator:
+	@echo "waiting for $(DEVICE_SERIAL) to be visible to ADB..."
+	@adb -s $(DEVICE_SERIAL) wait-for-device
+	@echo "waiting for $(DEVICE_SERIAL) to finish booting..."
+	@while [ "$$(adb -s $(DEVICE_SERIAL) shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do \
+		sleep 1; \
+	done
+	@echo "ok"
+
+screenshot: wait-emulator
 	@mkdir -p $(SCREENSHOT_DIR)
 	@TS=$$(date +%Y%m%d-%H%M%S); \
-	adb exec-out screencap -p > $(SCREENSHOT_DIR)/screenshot_$$TS.png; \
+	adb -s $(DEVICE_SERIAL) exec-out screencap -p > $(SCREENSHOT_DIR)/screenshot_$$TS.png; \
 	echo "saved to $(SCREENSHOT_DIR)/screenshot_$$TS.png"
 
-install-apps:
+install-apps: wait-emulator
 	$(ANDROID_WORLD_PYTHON) scripts/install_all_apps.py \
 		--console_port=$(CONSOLE_PORT) \
 		--grpc_port=$(GRPC_PORT)
@@ -84,16 +95,8 @@ install-package:
 
 ## ---- Benchmark ----
 
-run:
+run: wait-emulator
 	$(ANDROID_WORLD_PYTHON) run.py --config $(RUN_CONFIG) \
-		--llm_config_path=$(LLM_CONFIG) $(ARGS)
-
-run-debug:
-	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/debug.json \
-		--llm_config_path=$(LLM_CONFIG) $(ARGS)
-
-run-compiled:
-	$(ANDROID_WORLD_PYTHON) run.py --config configs/runs/compiled.json \
 		--llm_config_path=$(LLM_CONFIG) $(ARGS)
 
 ## ---- Post-processing ----
@@ -113,18 +116,13 @@ export-fail:
 		--missing-ok \
 		$(and $(TOKENIZER),--tokenizer $(TOKENIZER))
 
-retrofit-readable:
-	$(ANDROID_WORLD_PYTHON) scripts/retrofit_readable_raw_compiled_prompts.py \
-		$(RUN_DIR) \
-		--output-dir $(RETROFIT_OUTPUT_DIR)
-
 state-init:
 	$(ANDROID_WORLD_PYTHON) scripts/init_benchmark_state.py \
 		--run-dir $(RUN_DIR) \
 		--output $(BENCHMARK_STATE) \
 		--overwrite
 
-state-rerun:
+state-rerun: wait-emulator
 	$(ANDROID_WORLD_PYTHON) run.py --config $(RUN_CONFIG) \
 		--llm_config_path=$(LLM_CONFIG) \
 		--benchmark_state=$(BENCHMARK_STATE) $(ARGS)
